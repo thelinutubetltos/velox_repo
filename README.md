@@ -4,6 +4,7 @@ Official package repository for Velox Linux — custom tools, wallpapers, and ex
 
 Adding the Repository
 Add the following to your /etc/pacman.conf:
+
 ini[velox_repo]
 SigLevel = Never
 Server = https://thelinutubetltos.github.io/velox_repo/$arch
