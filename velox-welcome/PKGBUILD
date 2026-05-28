@@ -1,0 +1,19 @@
+pkgname=velox-welcome
+pkgver=1.0
+pkgrel=1
+pkgdesc="Velox Linux Welcome App"
+arch=('any')
+url="https://github.com/thelinutubetltos/velox-iso"
+license=('GPL3')
+depends=('python-pyqt6' 'paru')
+source=()
+
+package() {
+    mkdir -p "$pkgdir/usr/bin"
+    mkdir -p "$pkgdir/usr/share/applications"
+    mkdir -p "$pkgdir/usr/share/velox-welcome"
+
+    install -m 755 "$startdir/velox-welcome.py" "$pkgdir/usr/bin/velox-welcome"
+    install -m 644 "$startdir/velox-welcome.desktop" "$pkgdir/usr/share/applications/"
+    install -m 644 "$startdir/velox-logo.png" "$pkgdir/usr/share/velox-welcome/"
+}
