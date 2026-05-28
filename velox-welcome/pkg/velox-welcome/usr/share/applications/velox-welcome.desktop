@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Welcome to Velox Linux
+Comment=Velox Linux Welcome App
+Exec=velox-welcome
+Icon=velox-welcome
+Terminal=false
+Categories=System;
+Keywords=velox;welcome;setup;
