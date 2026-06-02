@@ -10,14 +10,17 @@ optdepends=('flatpak: Flatpak package search and install support'
             'yay: Alternative AUR helper'
             'snapper: Btrfs snapshot management'
             'grub-btrfs: Boot into snapshots from GRUB')
-source=()
+source=("velox-welcome::https://raw.githubusercontent.com/thelinutubetltos/velox-iso/main/archiso/airootfs/usr/bin/velox-welcome"
+        "velox-welcome.desktop"
+        "velox-logo.png")
+sha256sums=('SKIP' 'SKIP' 'SKIP')
 
 package() {
     mkdir -p "$pkgdir/usr/bin"
     mkdir -p "$pkgdir/usr/share/applications"
     mkdir -p "$pkgdir/usr/share/velox-welcome"
 
-    install -m 755 "$startdir/velox-welcome.py" "$pkgdir/usr/bin/velox-welcome"
-    install -m 644 "$startdir/velox-welcome.desktop" "$pkgdir/usr/share/applications/"
-    install -m 644 "$startdir/velox-logo.png" "$pkgdir/usr/share/velox-welcome/"
+    install -m 755 "$srcdir/velox-welcome" "$pkgdir/usr/bin/velox-welcome"
+    install -m 644 "$srcdir/velox-welcome.desktop" "$pkgdir/usr/share/applications/"
+    install -m 644 "$srcdir/velox-logo.png" "$pkgdir/usr/share/velox-welcome/"
 }
