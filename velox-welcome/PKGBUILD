@@ -1,11 +1,15 @@
 pkgname=velox-welcome
-pkgver=1.0
+pkgver=2.0
 pkgrel=1
-pkgdesc="Velox Linux Welcome App"
+pkgdesc="Velox Linux Welcome App — first steps, package installer, snapshots"
 arch=('any')
 url="https://github.com/thelinutubetltos/velox-iso"
 license=('GPL3')
 depends=('python-pyqt6' 'paru')
+optdepends=('flatpak: Flatpak package search and install support'
+            'yay: Alternative AUR helper'
+            'snapper: Btrfs snapshot management'
+            'grub-btrfs: Boot into snapshots from GRUB')
 source=()
 
 package() {
