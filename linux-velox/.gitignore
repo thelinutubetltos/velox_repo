@@ -1,0 +1,9 @@
+src/
+pkg/
+*.tar.gz
+*.tar.gz.asc
+*.tar.xz
+*.patch
+config-*
+linux-velox-*.pkg.tar.zst
+linux-velox-headers-*.pkg.tar.zst
