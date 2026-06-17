@@ -153,7 +153,12 @@ Total findings: 2
   CRITICAL — installation BLOCKED
 ────────────────────────────────────────────────
 Known malicious content was detected in one or more PKGBUILDs.
-Run with --no-check to bypass this block (strongly not recommended).
+
+[popup dialog appears]
+  ⚠ CRITICAL: Known malicious content detected
+  It is strongly NOT advisable to install or run this package.
+  You will be required to enter your sudo password to override.
+  [Block install (recommended)]  [Proceed anyway]
 ```
 
 The install never happens. paru is never called.
@@ -163,9 +168,9 @@ The install never happens. paru is never called.
 | Severity | Action |
 |---|---|
 | Clean / Info | Proceeds automatically |
-| Medium | Prints warning, proceeds |
-| High | Prompts `Install anyway? [y/N]` |
-| Critical | **Hard blocked** — paru/yay never called |
+| Medium | Install stopped — prompts `Proceed anyway? [y/N]` |
+| High | Install blocked — popup warning dialog, must click "Proceed anyway" to override |
+| Critical | Install blocked — popup warning dialog + sudo password required to override |
 
 ### velox-pkgcheck standalone
 
