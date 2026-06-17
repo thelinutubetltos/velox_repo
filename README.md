@@ -6,33 +6,33 @@
 
 ## Repositories
 
-Velox Linux uses two package repositories depending on file size.
-
-### velox_repo — GitHub Pages (small packages)
-
-Add to `/etc/pacman.conf`:
+Velox Linux uses two package repositories. Add both to `/etc/pacman.conf`:
 
 ```ini
 [velox_repo]
 SigLevel = Never
 Server = https://thelinutubetltos.github.io/velox_repo/$arch
-```
 
-### velox-packages — GitHub Releases (large packages)
-
-Add to `/etc/pacman.conf`:
-
-```ini
 [velox-packages]
 SigLevel = Never
 Server = https://github.com/thelinutubetltos/velox_repo/releases/download/velox-packages
 ```
 
-Then sync:
+Then sync and install the security scanner:
 
 ```bash
 sudo pacman -Sy
+sudo pacman -S velox-pkgcheck
 ```
+
+From that point on, `paru` and `yay` automatically scan PKGBUILDs before installing anything — no extra steps needed.
+
+### What each repo contains
+
+| Repo | Hosts | Packages |
+|---|---|---|
+| `velox_repo` | GitHub Pages | `velox-pkgcheck`, `velox-welcome`, `velox-wallpapers` |
+| `velox-packages` | GitHub Releases | `linux-velox`, `linux-velox-headers`, `calamares` |
 
 ---
 
