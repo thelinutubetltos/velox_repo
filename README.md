@@ -44,6 +44,7 @@ sudo pacman -Sy
 |---|---|---|
 | `velox-wallpapers` | Official Velox Linux wallpaper pack (Velox-1 through Velox-7) | Available |
 | `velox-welcome` | Velox welcome app — first-boot setup, app installer, kernel manager | Available |
+| `velox-pkgcheck` | PKGBUILD supply-chain attack scanner + `aur-install` wrapper | Available |
 
 ### velox-packages (GitHub Releases)
 
@@ -78,6 +79,75 @@ The Velox welcome app launches on first boot and includes:
 ```bash
 sudo pacman -S velox-welcome
 ```
+
+---
+
+## velox-pkgcheck
+
+A supply-chain attack scanner that inspects AUR PKGBUILDs **before** installation, protecting against attacks like the [Atomic Arch campaign (June 2026)](https://www.privacyguides.org/news/2026/06/12/around-1-500-aur-packages-compromised-with-rootkit-like-malware/) — where 1,500+ AUR packages were poisoned with an eBPF rootkit and credential stealer.
+
+```bash
+sudo pacman -S velox-pkgcheck
+```
+
+Installs two tools: `velox-pkgcheck` (the scanner) and `aur-install` (a paru/yay wrapper).
+
+### aur-install
+
+A drop-in replacement for `paru` or `yay` that automatically scans PKGBUILDs before installing anything. Auto-detects whichever AUR helper you have installed at runtime — switching helpers later keeps you protected.
+
+```bash
+# Use instead of paru/yay for AUR installs
+aur-install some-package
+aur-install some-package another-package
+
+# All paru/yay flags pass through unchanged
+aur-install --noconfirm some-package
+
+# Non-install operations (search, query, remove, upgrade) pass straight through
+aur-install -Syu
+aur-install -Ss firefox
+```
+
+**What happens on install:**
+
+| Result | Action |
+|---|---|
+| Clean / Info | Proceeds automatically |
+| Medium | Prints warning, proceeds |
+| High | Prompts "Install anyway? [y/N]" |
+| Critical | **Blocked** — known malicious content detected |
+
+Use `--no-check` to bypass the scan if you know what you're doing.
+
+### velox-pkgcheck
+
+The underlying scanner — use it standalone to inspect any PKGBUILD before installing.
+
+```bash
+# Scan a specific PKGBUILD
+velox-pkgcheck ~/path/to/PKGBUILD
+
+# Scan all PKGBUILDs in your paru/yay cache at once
+velox-pkgcheck --scan-aur-cache
+
+# Check installed AUR packages against the Atomic Arch attack window
+velox-pkgcheck --scan-installed
+
+# Check if your system is already compromised (eBPF artifacts, npm/bun cache, systemd services)
+velox-pkgcheck --check-system
+```
+
+**Severity levels:**
+
+| Level | Triggers |
+|---|---|
+| `CRITICAL` | Known malicious npm/bun packages (`atomic-lockfile`, `js-digest`, etc.) or known attacker AUR accounts |
+| `HIGH` | `npm install` in PKGBUILD, `curl \| bash`, `eval "$(…)"`, base64-decoded payloads, temp-dir droppers |
+| `MEDIUM` | `pip/gem install`, non-HTTPS source URLs, undeclared network downloads, eBPF ops |
+| `INFO` | npm build steps — likely fine, flagged for awareness |
+
+Exit codes map to severity (0 = clean, 4 = critical), so the tool integrates cleanly into scripts and CI.
 
 ---
 
