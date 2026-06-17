@@ -5,7 +5,7 @@
 #               whichever is present at runtime so it stays protected
 #               regardless of which helper the user has installed.
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 PROG="${0##*/}"
 
 # ── Colors ────────────────────────────────────────────────────────────────────
@@ -49,9 +49,9 @@ All other flags are passed directly to paru/yay.
 
 ${BOLD}BEHAVIOR${NC}
   CLEAN / INFO   → install proceeds automatically
-  MEDIUM         → warning shown, install proceeds
-  HIGH           → warning shown, prompts for confirmation
-  CRITICAL       → install is blocked (use --no-check to override)
+  MEDIUM         → install stopped, prompts for confirmation [y/N]
+  HIGH           → install blocked + popup warning dialog, confirm to override
+  CRITICAL       → install blocked + popup warning dialog + sudo password required to override
 
 System upgrades (paru -Syu / yay -Syu) and non-install operations
 (search, query, remove) are passed through directly without scanning.
@@ -101,29 +101,89 @@ gate() {
             return 0
             ;;
         2)
-            printf "${YELLOW}${BOLD}  MEDIUM findings noted above${NC} — proceeding with install\n"
-            printf "%b\n\n" "$HR"
-            return 0
-            ;;
-        3)
-            printf "${ORANGE}${BOLD}  HIGH-severity findings detected${NC}\n"
+            printf "${YELLOW}${BOLD}  MEDIUM-severity findings detected — install stopped${NC}\n"
             printf "%b\n" "$HR"
-            printf "${ORANGE}Install anyway?${NC} [y/N] "
+            printf "${YELLOW}Proceed with install anyway?${NC} [y/N] "
             read -r answer </dev/tty
             if [[ "${answer,,}" == "y" ]]; then
                 printf "\n"
                 return 0
             else
                 printf "${BOLD}Aborted.${NC}\n\n"
-                return 3
+                return 2
+            fi
+            ;;
+        3)
+            printf "${ORANGE}${BOLD}  HIGH-severity findings detected — install blocked${NC}\n"
+            printf "%b\n" "$HR"
+            printf "Suspicious patterns were detected in one or more PKGBUILDs.\n\n"
+
+            if command -v zenity &>/dev/null; then
+                zenity --question \
+                    --title="HIGH Severity Warning — velox-pkgcheck" \
+                    --text="<b>⚠ HIGH: Suspicious content detected</b>\n\nThis package contains patterns commonly associated with malicious activity\nsuch as remote code execution, encoded payloads, or network droppers.\n\n<b>It is not advisable to install this package.</b>\n\nDo you want to proceed anyway?" \
+                    --ok-label="Proceed anyway" \
+                    --cancel-label="Block install (recommended)" \
+                    --width=500 2>/dev/null
+                local dialog_rc=$?
+                if [[ $dialog_rc -ne 0 ]]; then
+                    printf "${ORANGE}${BOLD}  Install blocked.${NC}\n\n"
+                    return 3
+                fi
+                printf "${YELLOW}${BOLD}  WARNING: Proceeding with HIGH-severity package — you have been warned.${NC}\n\n"
+                return 0
+            else
+                # No zenity — terminal fallback
+                printf "${ORANGE}Proceed with install anyway?${NC} [y/N] "
+                read -r answer </dev/tty
+                if [[ "${answer,,}" == "y" ]]; then
+                    printf "\n"
+                    return 0
+                else
+                    printf "${BOLD}Aborted.${NC}\n\n"
+                    return 3
+                fi
             fi
             ;;
         4)
             printf "${LRED}${BOLD}  CRITICAL — installation BLOCKED${NC}\n"
             printf "%b\n" "$HR"
-            printf "Known malicious content was detected in one or more PKGBUILDs.\n"
-            printf "Run with ${BOLD}--no-check${NC} to bypass this block (strongly not recommended).\n\n"
-            return 4
+            printf "Known malicious content was detected in one or more PKGBUILDs.\n\n"
+
+            # Popup warning dialog
+            if command -v zenity &>/dev/null; then
+                zenity --question \
+                    --title="CRITICAL SECURITY THREAT — velox-pkgcheck" \
+                    --text="<b>⚠ CRITICAL: Known malicious content detected</b>\n\nThis package has been identified as containing known malicious content\nsuch as supply-chain attack payloads, eBPF rootkits, or credential stealers.\n\n<b>It is strongly NOT advisable to install or run this package.</b>\n\nOnly proceed if you are absolutely certain this is safe.\nYou will be required to enter your sudo password to override." \
+                    --ok-label="Proceed anyway" \
+                    --cancel-label="Block install (recommended)" \
+                    --width=500 2>/dev/null
+                local dialog_rc=$?
+                if [[ $dialog_rc -ne 0 ]]; then
+                    printf "${LRED}${BOLD}  Install blocked.${NC}\n\n"
+                    return 4
+                fi
+                # User clicked "Proceed anyway" — require sudo password
+                local password
+                password=$(zenity --password \
+                    --title="Confirm identity to override security block" 2>/dev/null)
+                if [[ $? -ne 0 ]] || [[ -z "$password" ]]; then
+                    printf "${LRED}${BOLD}  No password provided — install blocked.${NC}\n\n"
+                    return 4
+                fi
+                sudo -k 2>/dev/null
+                if echo "$password" | sudo -S true 2>/dev/null; then
+                    printf "${YELLOW}${BOLD}  WARNING: Proceeding with CRITICAL package — you have been warned.${NC}\n\n"
+                    return 0
+                else
+                    printf "${LRED}${BOLD}  Incorrect password — install blocked.${NC}\n\n"
+                    return 4
+                fi
+            else
+                # No zenity — terminal-only fallback
+                printf "${LRED}Install is blocked. Run with ${BOLD}--no-check${NC}${LRED} to bypass (strongly not recommended).${NC}\n\n"
+                return 4
+            fi
             ;;
     esac
 }
