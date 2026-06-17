@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+#
+# aur-install — AUR wrapper that scans PKGBUILDs with velox-pkgcheck
+#               before installing. Works with paru or yay — detects
+#               whichever is present at runtime so it stays protected
+#               regardless of which helper the user has installed.
+
+VERSION="1.0.0"
+PROG="${0##*/}"
+
+# ── Colors ────────────────────────────────────────────────────────────────────
+if [[ -t 1 ]]; then
+    RED='\033[0;31m'; LRED='\033[1;31m'
+    ORANGE='\033[0;33m'; YELLOW='\033[1;33m'
+    GREEN='\033[0;32m'; CYAN='\033[0;36m'
+    BOLD='\033[1m'; DIM='\033[2m'; NC='\033[0m'
+else
+    RED=''; LRED=''; ORANGE=''; YELLOW=''
+    GREEN=''; CYAN=''; BOLD=''; DIM=''; NC=''
+fi
+
+HR="${DIM}────────────────────────────────────────────────${NC}"
+
+# ── Detect AUR helper (paru preferred, yay fallback) ─────────────────────────
+detect_helper() {
+    if command -v paru &>/dev/null; then echo "paru"
+    elif command -v yay  &>/dev/null; then echo "yay"
+    else return 1
+    fi
+}
+
+# ── Usage ─────────────────────────────────────────────────────────────────────
+usage() {
+    cat <<EOF
+${BOLD}aur-install ${VERSION}${NC} — AUR installer with pre-install security scanning
+
+${BOLD}USAGE${NC}
+  ${PROG} [OPTIONS] <package> [package...]
+  ${PROG} [paru/yay flags] <package> [package...]
+
+${BOLD}OPTIONS${NC}
+  --no-check    Skip security scan (not recommended)
+  --helper      Print which AUR helper will be used and exit
+  -h, --help    Show this help
+  --version     Show version
+
+All other flags are passed directly to paru/yay.
+
+${BOLD}BEHAVIOR${NC}
+  CLEAN / INFO   → install proceeds automatically
+  MEDIUM         → warning shown, install proceeds
+  HIGH           → warning shown, prompts for confirmation
+  CRITICAL       → install is blocked (use --no-check to override)
+
+System upgrades (paru -Syu / yay -Syu) and non-install operations
+(search, query, remove) are passed through directly without scanning.
+EOF
+}
+
+# ── Fetch PKGBUILD via the AUR helper into a temp dir ────────────────────────
+fetch_pkgbuild() {
+    local helper="$1" pkg="$2" outdir="$3"
+    local prev="$PWD"
+    cd "$outdir" || return 1
+    # -G / --getpkgbuild clones the AUR git repo — works the same on paru and yay
+    "$helper" -G "$pkg" &>/dev/null 2>&1
+    local rc=$?
+    cd "$prev" || true
+    return $rc
+}
+
+# ── Scan one package, return velox-pkgcheck exit code ────────────────────────
+scan_package() {
+    local pkg="$1" tmpdir="$2"
+    local pkgbuild="$tmpdir/$pkg/PKGBUILD"
+
+    printf "\n%b\n" "$HR"
+    printf "${BOLD}Scanning PKGBUILD:${NC} %s\n" "$pkg"
+    printf "%b\n\n" "$HR"
+
+    if [[ ! -f "$pkgbuild" ]]; then
+        printf "${YELLOW}  Could not fetch PKGBUILD for '%s'${NC}\n" "$pkg"
+        printf "  ${DIM}(not in AUR, or AUR helper fetch failed — passing through to %s)${NC}\n" "$HELPER"
+        return 0  # treat as clean; the helper will handle it
+    fi
+
+    velox-pkgcheck "$pkgbuild"
+    return $?
+}
+
+# ── Decision gate after scanning all packages ─────────────────────────────────
+gate() {
+    local worst="$1"
+    printf "\n%b\n" "$HR"
+
+    case $worst in
+        0|1)
+            printf "${GREEN}${BOLD}  SCAN PASSED${NC} — proceeding with install\n"
+            printf "%b\n\n" "$HR"
+            return 0
+            ;;
+        2)
+            printf "${YELLOW}${BOLD}  MEDIUM findings noted above${NC} — proceeding with install\n"
+            printf "%b\n\n" "$HR"
+            return 0
+            ;;
+        3)
+            printf "${ORANGE}${BOLD}  HIGH-severity findings detected${NC}\n"
+            printf "%b\n" "$HR"
+            printf "${ORANGE}Install anyway?${NC} [y/N] "
+            read -r answer </dev/tty
+            if [[ "${answer,,}" == "y" ]]; then
+                printf "\n"
+                return 0
+            else
+                printf "${BOLD}Aborted.${NC}\n\n"
+                return 3
+            fi
+            ;;
+        4)
+            printf "${LRED}${BOLD}  CRITICAL — installation BLOCKED${NC}\n"
+            printf "%b\n" "$HR"
+            printf "Known malicious content was detected in one or more PKGBUILDs.\n"
+            printf "Run with ${BOLD}--no-check${NC} to bypass this block (strongly not recommended).\n\n"
+            return 4
+            ;;
+    esac
+}
+
+# ── Determine whether this invocation is an install operation ─────────────────
+# System upgrades and non-install ops (search/query/remove/info) pass through.
+is_install_op() {
+    local args=("$@")
+    local has_packages=0 is_passthrough=0
+
+    for arg in "${args[@]}"; do
+        case "$arg" in
+            # Explicit passthrough operations
+            -Q*|--query*|-R*|--remove*|-G*|--getpkgbuild*|-h|--help|--version) is_passthrough=1 ;;
+            # Search/info also pass through
+            -Ss*|--search*|-Si*|--info*|-Sl*|-Sc*|--clean*) is_passthrough=1 ;;
+            # Flags — not package names
+            -*) ;;
+            # Bare word = package name
+            *) has_packages=1 ;;
+        esac
+    done
+
+    [[ $is_passthrough -eq 0 && $has_packages -eq 1 ]]
+}
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+main() {
+    local no_check=0
+    local passthrough_args=()
+    local pkg_names=()
+
+    # Handle our own flags first; collect everything else for the helper
+    for arg in "$@"; do
+        case "$arg" in
+            -h|--help)    usage; exit 0 ;;
+            --version)    printf "%s %s\n" "$PROG" "$VERSION"; exit 0 ;;
+            --no-check)   no_check=1 ;;
+            --helper)
+                HELPER=$(detect_helper) || { printf "${RED}No AUR helper found (install paru or yay)${NC}\n" >&2; exit 1; }
+                printf "Using: %s\n" "$HELPER"
+                exit 0
+                ;;
+            -*)           passthrough_args+=("$arg") ;;
+            *)            pkg_names+=("$arg"); passthrough_args+=("$arg") ;;
+        esac
+    done
+
+    # Detect helper
+    HELPER=$(detect_helper) || {
+        printf "${RED}${BOLD}Error:${NC} No AUR helper found. Install paru or yay first.\n" >&2
+        exit 1
+    }
+
+    printf "${BOLD}${CYAN}aur-install ${VERSION}${NC} ${DIM}(using ${HELPER})${NC}\n"
+
+    # Skip scan if --no-check or not an install operation
+    if [[ $no_check -eq 1 ]]; then
+        printf "${YELLOW}  --no-check: skipping security scan${NC}\n\n"
+        exec "$HELPER" "${passthrough_args[@]}"
+    fi
+
+    if ! is_install_op "${passthrough_args[@]}"; then
+        # Not an install — just proxy through
+        exec "$HELPER" "${passthrough_args[@]}"
+    fi
+
+    # Check velox-pkgcheck is installed
+    if ! command -v velox-pkgcheck &>/dev/null; then
+        printf "${YELLOW}  Warning: velox-pkgcheck not found — installing without scan${NC}\n"
+        printf "  ${DIM}Install it with: paru -S velox-pkgcheck${NC}\n\n"
+        exec "$HELPER" "${passthrough_args[@]}"
+    fi
+
+    # Fetch and scan each package
+    local tmpdir; tmpdir=$(mktemp -d)
+    trap 'rm -rf "$tmpdir"' EXIT
+
+    local worst=0
+    for pkg in "${pkg_names[@]}"; do
+        fetch_pkgbuild "$HELPER" "$pkg" "$tmpdir"
+        scan_package "$pkg" "$tmpdir"
+        local result=$?
+        [[ $result -gt $worst ]] && worst=$result
+    done
+
+    # Gate: block, prompt, or proceed
+    gate "$worst" || exit $?
+
+    # Hand off to the real AUR helper
+    exec "$HELPER" "${passthrough_args[@]}"
+}
+
+main "$@"

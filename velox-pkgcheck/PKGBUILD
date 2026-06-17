@@ -1,0 +1,19 @@
+# Maintainer: Alex <thelinuxtube@gmail.com>
+pkgname=velox-pkgcheck
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="PKGBUILD supply-chain attack scanner — detects Atomic Arch, curl|bash, and common AUR malware patterns"
+arch=('any')
+url="https://github.com/thelinutubetltos/velox_repo"
+license=('GPL3')
+depends=('bash' 'pacman' 'grep' 'findutils')
+source=(
+    "velox-pkgcheck::https://raw.githubusercontent.com/thelinutubetltos/velox_repo/main/velox-pkgcheck/velox-pkgcheck"
+    "aur-install::https://raw.githubusercontent.com/thelinutubetltos/velox_repo/main/velox-pkgcheck/aur-install"
+)
+sha256sums=('SKIP' 'SKIP')
+
+package() {
+    install -Dm755 "${srcdir}/velox-pkgcheck" "${pkgdir}/usr/bin/velox-pkgcheck"
+    install -Dm755 "${srcdir}/aur-install"    "${pkgdir}/usr/bin/aur-install"
+}
