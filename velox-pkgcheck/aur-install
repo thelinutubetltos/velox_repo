@@ -22,9 +22,10 @@ fi
 HR="${DIM}────────────────────────────────────────────────${NC}"
 
 # ── Detect AUR helper (paru preferred, yay fallback) ─────────────────────────
+# Use absolute /usr/bin paths so we never hit our own wrappers in /usr/local/bin
 detect_helper() {
-    if command -v paru &>/dev/null; then echo "paru"
-    elif command -v yay  &>/dev/null; then echo "yay"
+    if [[ -x /usr/bin/paru ]]; then echo "/usr/bin/paru"
+    elif [[ -x /usr/bin/yay  ]]; then echo "/usr/bin/yay"
     else return 1
     fi
 }

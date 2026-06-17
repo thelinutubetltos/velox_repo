@@ -1,12 +1,14 @@
 # Maintainer: Alex <thelinuxtube@gmail.com>
 pkgname=velox-pkgcheck
 pkgver=1.0.0
-pkgrel=1
+pkgrel=2
 pkgdesc="PKGBUILD supply-chain attack scanner — detects Atomic Arch, curl|bash, and common AUR malware patterns"
 arch=('any')
 url="https://github.com/thelinutubetltos/velox_repo"
 license=('GPL3')
 depends=('bash' 'pacman' 'grep' 'findutils')
+optdepends=('paru: AUR helper (paru or yay required for aur-install)'
+            'yay: AUR helper (paru or yay required for aur-install)')
 source=(
     "velox-pkgcheck::https://raw.githubusercontent.com/thelinutubetltos/velox_repo/main/velox-pkgcheck/velox-pkgcheck"
     "aur-install::https://raw.githubusercontent.com/thelinutubetltos/velox_repo/main/velox-pkgcheck/aur-install"
@@ -16,4 +18,10 @@ sha256sums=('SKIP' 'SKIP')
 package() {
     install -Dm755 "${srcdir}/velox-pkgcheck" "${pkgdir}/usr/bin/velox-pkgcheck"
     install -Dm755 "${srcdir}/aur-install"    "${pkgdir}/usr/bin/aur-install"
+
+    # Wrappers at /usr/local/bin take priority over /usr/bin in PATH,
+    # so paru/yay transparently route through aur-install for all users/shells.
+    install -dm755 "${pkgdir}/usr/local/bin"
+    ln -s /usr/bin/aur-install "${pkgdir}/usr/local/bin/paru"
+    ln -s /usr/bin/aur-install "${pkgdir}/usr/local/bin/yay"
 }
