@@ -1,6 +1,6 @@
 pkgname=velox-control-center
 pkgver=1.0
-pkgrel=1
+pkgrel=2
 pkgdesc="Velox Control Center — software, drivers, kernels, desktops, snapshots and system tools"
 arch=('any')
 url="https://github.com/thelinutubetltos/velox-iso"
@@ -28,6 +28,9 @@ package() {
 
     # Main executable
     install -Dm755 "$src/velox-control-center" "$pkgdir/usr/bin/velox-control-center"
+
+    # First-boot announcement helper
+    install -Dm755 "$src/velox-announce" "$pkgdir/usr/bin/velox-announce"
 
     # Icons
     install -dm755 "$pkgdir/usr/lib/velox-control-center/icons"
