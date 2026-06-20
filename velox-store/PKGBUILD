@@ -1,6 +1,6 @@
 pkgname=velox-control-center
 pkgver=1.0
-pkgrel=3
+pkgrel=4
 pkgdesc="Velox Control Center — software, drivers, kernels, desktops, snapshots and system tools"
 arch=('any')
 url="https://github.com/thelinutubetltos/velox-iso"

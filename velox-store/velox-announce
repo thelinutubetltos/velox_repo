@@ -1,5 +1,10 @@
 #!/bin/bash
-sleep 8
+# Wait for velox-set-resolution to finish before showing announcement
+for i in $(seq 1 60); do
+    pgrep -f "velox-set-resolution" > /dev/null || break
+    sleep 1
+done
+sleep 2
 
 kdialog \
     --title "Welcome to Velox Linux" \
