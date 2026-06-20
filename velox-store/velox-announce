@@ -1,4 +1,6 @@
 #!/bin/bash
+sleep 8
+
 kdialog \
     --title "Welcome to Velox Linux" \
     --yesno "$(printf 'Welcome to Velox Linux!\n\nThe Velox Control Center is your one-stop shop for everything:\n\n  •  Install apps — pacman, AUR, Chaotic-AUR & Flatpak\n  •  GPU drivers — NVIDIA, AMD and Intel\n  •  Switch desktop environments or kernels\n  •  Manage BTRFS snapshots with Snapper\n  •  One-click system updates\n  •  Fix broken keyrings\n\nWould you like to open it now?')" \
