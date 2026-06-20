@@ -11,6 +11,8 @@ import urllib.request
 import urllib.parse
 import xml.etree.ElementTree as ET
 import email.utils
+import glob
+import time
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass, field
 from typing import Optional
@@ -489,6 +491,35 @@ class TerminalWorker(QThread):
             self.line_ready.emit(f"Error: {e}")
             self.finished_ok.emit(False)
 
+class KeyringAutoRefreshWorker(QThread):
+    status = pyqtSignal(str)   # status message for UI
+    done   = pyqtSignal(bool)  # True = refreshed OK, False = skipped/failed
+
+    _STALE_DAYS = 7
+
+    def run(self):
+        try:
+            # Check age of installed archlinux-keyring without root
+            files = glob.glob("/var/lib/pacman/local/archlinux-keyring-*/desc")
+            if not files:
+                self.done.emit(False)
+                return
+            age_days = (time.time() - os.path.getmtime(files[0])) / 86400
+            if age_days < self._STALE_DAYS:
+                self.done.emit(False)
+                return
+
+            # Keyring is stale — refresh silently
+            self.status.emit(f"🔑  Refreshing keyring ({int(age_days)}d old)…")
+            result = subprocess.run(
+                ["pkexec", "pacman", "-Sy", "--noconfirm", "archlinux-keyring"],
+                capture_output=True, text=True, timeout=120
+            )
+            self.done.emit(result.returncode == 0)
+        except Exception:
+            self.done.emit(False)
+
+
 class ArchNewsWorker(QThread):
     done = pyqtSignal(list)   # list of (title, link, date_str, is_recent)
 
@@ -786,6 +817,7 @@ class VeloxStore(QMainWindow):
         self._install_worker = None
         self._pkgcheck_worker = None
         self._news_worker = None
+        self._keyring_worker = None
         self._arch_news = []
         self._current_results = []
 
@@ -806,6 +838,7 @@ class VeloxStore(QMainWindow):
 
         self._build_ui()
         self._show_home()
+        self._start_keyring_autorefresh()
 
     def _build_ui(self):
         self.setStyleSheet(STYLESHEET)
@@ -890,6 +923,14 @@ class VeloxStore(QMainWindow):
         _sb_sep()
         _sb_section("TOOLS")
         _tool_btn("🔑  Fix Keyrings",    self._run_fix_keyrings)
+
+        self._keyring_status_lbl = QLabel("")
+        self._keyring_status_lbl.setStyleSheet(
+            f"font-size: 10px; color: {SUBTEXT}; padding: 0 6px 4px 6px;"
+        )
+        self._keyring_status_lbl.setWordWrap(True)
+        self._keyring_status_lbl.setVisible(False)
+        sb_layout.addWidget(self._keyring_status_lbl)
 
         _sb_sep()
         _sb_section("SOURCES")
@@ -1971,6 +2012,30 @@ class VeloxStore(QMainWindow):
 
     # ── TOOLS actions ─────────────────────────────────────────────────────────
 
+    def _start_keyring_autorefresh(self):
+        self._keyring_worker = KeyringAutoRefreshWorker()
+        self._keyring_worker.status.connect(self._on_keyring_status)
+        self._keyring_worker.done.connect(self._on_keyring_done)
+        self._keyring_worker.start()
+
+    def _on_keyring_status(self, msg: str):
+        self._keyring_status_lbl.setText(msg)
+        self._keyring_status_lbl.setStyleSheet(
+            f"font-size: 10px; color: {SUBTEXT}; padding: 0 6px 4px 6px;"
+        )
+        self._keyring_status_lbl.setVisible(True)
+
+    def _on_keyring_done(self, refreshed: bool):
+        if refreshed:
+            self._keyring_status_lbl.setText("✓  Keyring up to date")
+            self._keyring_status_lbl.setStyleSheet(
+                f"font-size: 10px; color: {GREEN}; padding: 0 6px 4px 6px;"
+            )
+            self._keyring_status_lbl.setVisible(True)
+            QTimer.singleShot(5000, lambda: self._keyring_status_lbl.setVisible(False))
+        else:
+            self._keyring_status_lbl.setVisible(False)
+
     def _run_fix_keyrings(self):
         script = (
             "pacman-key --init && "
@@ -2316,7 +2381,7 @@ class VeloxStore(QMainWindow):
             if msg.clickedButton() != update_btn:
                 return
 
-        cmd = "pkexec pacman -Syu --noconfirm"
+        cmd = "pkexec bash -c 'pacman -Sy --noconfirm archlinux-keyring && pacman -Syu --noconfirm'"
         if shutil.which("flatpak"):
             cmd += " && flatpak update -y"
         self._run_terminal_cmd("Update All", ["bash", "-c", cmd])
