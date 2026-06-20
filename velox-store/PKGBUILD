@@ -1,0 +1,41 @@
+pkgname=velox-control-center
+pkgver=1.0
+pkgrel=1
+pkgdesc="Velox Control Center — software, drivers, kernels, desktops, snapshots and system tools"
+arch=('any')
+url="https://github.com/thelinutubetltos/velox-iso"
+license=('custom')
+depends=(
+    'python'
+    'python-pyqt6'
+    'pyalpm'
+    'python-gobject'
+    'flatpak'
+    'paru'
+    'pacman-contrib'
+)
+optdepends=(
+    'snapper: BTRFS snapshot management'
+    'mangohud: GPU performance overlay'
+    'corectrl: AMD GPU control'
+    'gwe: NVIDIA GPU fan/OC control'
+    'nvtop: GPU process monitor'
+)
+source=()
+
+package() {
+    local src="$startdir"
+
+    # Main executable
+    install -Dm755 "$src/velox-control-center" "$pkgdir/usr/bin/velox-control-center"
+
+    # Icons
+    install -dm755 "$pkgdir/usr/lib/velox-control-center/icons"
+    for icon in "$src/icons/"*; do
+        install -Dm644 "$icon" "$pkgdir/usr/lib/velox-control-center/icons/$(basename "$icon")"
+    done
+
+    # Desktop entry
+    install -Dm644 "$src/velox-control-center.desktop" \
+        "$pkgdir/usr/share/applications/velox-control-center.desktop"
+}

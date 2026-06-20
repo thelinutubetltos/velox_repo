@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Velox Control Center
+Comment=Software, drivers, kernels, desktops, snapshots and system tools in one place
+Exec=velox-control-center
+Icon=system-software-install
+Categories=System;PackageManager;Settings;
+Keywords=package;install;software;store;aur;flatpak;drivers;gpu;kernel;snapshots;

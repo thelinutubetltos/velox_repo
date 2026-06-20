@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Velox Store
+Comment=Install apps from pacman, AUR and Flatpak
+Exec=velox-store
+Icon=system-software-install
+Categories=System;PackageManager;
+Keywords=package;install;software;store;aur;flatpak;

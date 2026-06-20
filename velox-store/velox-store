@@ -1,0 +1,2337 @@
+#!/usr/bin/env python3
+# velox-store — Velox Linux Software Center
+
+import sys
+import os
+import subprocess
+import json
+import tempfile
+import shutil
+import urllib.request
+import urllib.parse
+from dataclasses import dataclass, field
+from typing import Optional
+
+import pyalpm
+import gi
+gi.require_version("Flatpak", "1.0")
+from gi.repository import Flatpak, GLib
+
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QPushButton, QLineEdit, QScrollArea, QFrame, QStackedWidget,
+    QListWidget, QListWidgetItem, QSplitter, QDialog, QDialogButtonBox,
+    QTextEdit, QProgressDialog, QMessageBox, QGridLayout, QSizePolicy,
+    QSpacerItem, QCheckBox, QButtonGroup
+)
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer, QRunnable, QThreadPool
+from PyQt6.QtGui import QIcon, QPixmap, QColor, QPainter, QFont, QFontMetrics
+
+# ── Velox palette ─────────────────────────────────────────────────────────────
+GREEN   = "#6dab74"
+DARK    = "#1e1e1e"
+CARD_BG = "#2a2a2a"
+TEXT    = "#e0e0e0"
+SUBTEXT = "#999999"
+BADGE_PACMAN  = "#2196F3"
+BADGE_AUR     = "#FF9800"
+BADGE_FLATPAK = "#9C27B0"
+
+STYLESHEET = f"""
+QMainWindow, QWidget {{
+    background: {DARK}; color: {TEXT};
+    font-family: 'Noto Sans', sans-serif; font-size: 13px;
+}}
+QLineEdit {{
+    background: #2e2e2e; border: 1px solid #3a3a3a; border-radius: 20px;
+    padding: 7px 16px; color: {TEXT}; font-size: 13px;
+}}
+QLineEdit:focus {{ border-color: {GREEN}; background: #333; }}
+QPushButton {{
+    background: {GREEN}; color: #fff; border: none; border-radius: 16px;
+    padding: 5px 18px; font-size: 12px; font-weight: 600; min-height: 28px;
+}}
+QPushButton:hover {{ background: #79bb80; }}
+QPushButton:pressed {{ background: #5a9461; }}
+QPushButton:disabled {{ background: #3a3a3a; color: #666; }}
+QPushButton#secondary {{
+    background: transparent; color: {TEXT};
+    border: 1px solid #484848; border-radius: 16px;
+}}
+QPushButton#secondary:hover {{ background: #2e2e2e; border-color: #666; }}
+QPushButton#danger {{
+    background: transparent; color: #e05555;
+    border: 1px solid #e05555; border-radius: 16px;
+}}
+QPushButton#danger:hover {{ background: #e05555; color: #fff; }}
+QListWidget {{
+    background: transparent; border: none; font-size: 13px; padding: 4px 0;
+}}
+QListWidget::item {{
+    padding: 9px 14px; border-radius: 10px; color: {TEXT};
+}}
+QListWidget::item:selected {{ background: {GREEN}22; color: {GREEN}; font-weight: 600; }}
+QListWidget::item:hover:!selected {{ background: #2e2e2e; }}
+QScrollArea {{ border: none; background: transparent; }}
+QScrollBar:vertical {{
+    background: transparent; width: 6px; border-radius: 3px; margin: 0;
+}}
+QScrollBar::handle:vertical {{
+    background: #444; border-radius: 3px; min-height: 24px;
+}}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+QScrollBar:horizontal {{ height: 0; }}
+QTextEdit {{
+    background: #252525; border: 1px solid #383838;
+    border-radius: 10px; color: {TEXT}; padding: 6px;
+}}
+QDialog {{ background: {DARK}; color: {TEXT}; }}
+QLabel#heading {{ font-size: 20px; font-weight: 700; color: {TEXT}; }}
+QLabel#subheading {{ font-size: 13px; color: {SUBTEXT}; }}
+QCheckBox {{ spacing: 8px; color: {TEXT}; }}
+QCheckBox::indicator {{
+    width: 16px; height: 16px; border-radius: 4px;
+    border: 1px solid #484848; background: #2e2e2e;
+}}
+QCheckBox::indicator:checked {{ background: {GREEN}; border-color: {GREEN}; }}
+"""
+
+NAV_BTN_STYLE = f"""
+QPushButton {{
+    background: transparent; color: {TEXT}; border: none;
+    border-radius: 9px; padding: 8px 12px; font-size: 13px;
+    text-align: left;
+}}
+QPushButton:hover {{ background: #272727; }}
+QPushButton:checked {{ background: {GREEN}22; color: {GREEN}; font-weight: 700; }}
+"""
+NAV_TOOL_BTN_STYLE = f"""
+QPushButton {{
+    background: transparent; color: {TEXT}; border: none;
+    border-radius: 9px; padding: 8px 12px; font-size: 13px;
+    text-align: left;
+}}
+QPushButton:hover {{ background: #272727; }}
+QPushButton:pressed {{ background: #1e1e1e; }}
+"""
+
+# ── Data model ────────────────────────────────────────────────────────────────
+
+@dataclass
+class Package:
+    name: str
+    version: str
+    description: str
+    source: str          # 'pacman' | 'aur' | 'flatpak'
+    installed: bool = False
+    icon_name: str = ""
+    url: str = ""
+    size: str = ""
+    votes: int = 0       # AUR only
+    flatpak_ref: str = ""  # Flatpak only
+
+# ── Icon loader ───────────────────────────────────────────────────────────────
+
+_ICON_CACHE: dict[str, QPixmap] = {}
+
+def load_icon(name: str, source: str, size: int = 48) -> QPixmap:
+    cache_key = f"{name}:{source}:{size}"
+    if cache_key in _ICON_CACHE:
+        return _ICON_CACHE[cache_key]
+    px = _load_icon_uncached(name, source, size)
+    _ICON_CACHE[cache_key] = px
+    return px
+
+def _load_icon_uncached(name: str, source: str, size: int) -> QPixmap:
+    if name:
+        icon = QIcon.fromTheme(name)
+        if not icon.isNull():
+            return icon.pixmap(size, size)
+        icon = QIcon.fromTheme(name.lower())
+        if not icon.isNull():
+            return icon.pixmap(size, size)
+        for path in [f"/usr/share/pixmaps/{name}.png",
+                     f"/usr/share/pixmaps/{name}.svg",
+                     f"/usr/share/icons/hicolor/48x48/apps/{name}.png",
+                     f"/usr/share/icons/hicolor/scalable/apps/{name}.svg"]:
+            if os.path.exists(path):
+                px = QPixmap(path)
+                if not px.isNull():
+                    return px.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio,
+                                     Qt.TransformationMode.SmoothTransformation)
+    return _fallback_icon(source, size)
+
+
+class IconLoader(QThread):
+    """Loads icons for a batch of cards in the background."""
+    icon_ready = pyqtSignal(str, str, int, QPixmap)  # name, source, size, pixmap
+
+    def __init__(self, tasks: list[tuple[str, str, int]]):
+        super().__init__()
+        self.tasks = tasks
+
+    def run(self):
+        for name, source, size in self.tasks:
+            cache_key = f"{name}:{source}:{size}"
+            if cache_key not in _ICON_CACHE:
+                px = _load_icon_uncached(name, source, size)
+                _ICON_CACHE[cache_key] = px
+            self.icon_ready.emit(name, source, size, _ICON_CACHE[cache_key])
+
+def _fallback_icon(source: str, size: int) -> QPixmap:
+    colors = {"pacman": BADGE_PACMAN, "aur": BADGE_AUR, "flatpak": BADGE_FLATPAK}
+    color = colors.get(source, GREEN)
+    px = QPixmap(size, size)
+    px.fill(Qt.GlobalColor.transparent)
+    p = QPainter(px)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setBrush(QColor(color))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.drawRoundedRect(0, 0, size, size, size * 0.2, size * 0.2)
+    p.setPen(QColor("#fff"))
+    f = QFont("Noto Sans", size // 3, QFont.Weight.Bold)
+    p.setFont(f)
+    p.drawText(0, 0, size, size, Qt.AlignmentFlag.AlignCenter,
+               source[0].upper())
+    p.end()
+    return px
+
+# ── Backends ──────────────────────────────────────────────────────────────────
+
+class PacmanBackend:
+    def __init__(self):
+        self._handle = pyalpm.Handle("/", "/var/lib/pacman")
+        self._localdb = self._handle.get_localdb()
+        self._syncdbs = []
+        for db_name in ["core", "extra", "multilib", "velox_repo", "nemesis_repo", "chaotic-aur"]:
+            try:
+                db = self._handle.register_syncdb(db_name, pyalpm.SIG_DATABASE_OPTIONAL)
+                self._syncdbs.append(db)
+            except Exception:
+                pass
+
+    def search(self, query: str) -> list[Package]:
+        results = []
+        seen = set()
+        q = query.lower()
+        for db in self._syncdbs:
+            try:
+                for pkg in db.search(q):
+                    if pkg.name in seen:
+                        continue
+                    seen.add(pkg.name)
+                    installed = self._localdb.get_pkg(pkg.name) is not None
+                    results.append(Package(
+                        name=pkg.name,
+                        version=pkg.version,
+                        description=pkg.desc or "",
+                        source="pacman",
+                        installed=installed,
+                        icon_name=pkg.name,
+                        url=pkg.url or "",
+                        size=_fmt_size(pkg.isize),
+                    ))
+            except Exception:
+                continue
+        return results
+
+    def install(self, name: str) -> tuple[bool, str]:
+        result = subprocess.run(
+            ["pkexec", "pacman", "-S", "--noconfirm", "--needed", name],
+            capture_output=True, text=True
+        )
+        return result.returncode == 0, result.stdout + result.stderr
+
+    def remove(self, name: str) -> tuple[bool, str]:
+        result = subprocess.run(
+            ["pkexec", "pacman", "-R", "--noconfirm", name],
+            capture_output=True, text=True
+        )
+        return result.returncode == 0, result.stdout + result.stderr
+
+    def is_installed(self, name: str) -> bool:
+        return self._localdb.get_pkg(name) is not None
+
+    def refresh(self):
+        self._localdb = self._handle.get_localdb()
+
+
+class AURBackend:
+    AUR_API = "https://aur.archlinux.org/rpc/v5/search/{}"
+    AUR_GIT = "https://aur.archlinux.org/{}.git"
+
+    def search(self, query: str) -> list[Package]:
+        try:
+            url = self.AUR_API.format(urllib.parse.quote(query))
+            req = urllib.request.Request(url, headers={"User-Agent": "velox-store/1.0"})
+            with urllib.request.urlopen(req, timeout=8) as r:
+                data = json.loads(r.read())
+            results = []
+            local_handle = pyalpm.Handle("/", "/var/lib/pacman")
+            localdb = local_handle.get_localdb()
+            for item in (data.get("results") or [])[:50]:
+                name = item.get("Name", "")
+                installed = localdb.get_pkg(name) is not None
+                results.append(Package(
+                    name=name,
+                    version=item.get("Version", ""),
+                    description=item.get("Description") or "",
+                    source="aur",
+                    installed=installed,
+                    icon_name=name,
+                    url=f"https://aur.archlinux.org/packages/{name}",
+                    votes=item.get("NumVotes", 0),
+                ))
+            results.sort(key=lambda p: p.votes, reverse=True)
+            return results
+        except Exception:
+            return []
+
+    TIMEOUT = -1  # sentinel: network/clone timeout, not a security finding
+
+    def pkgcheck(self, name: str) -> tuple[int, str]:
+        """Download PKGBUILD and run velox-pkgcheck. Returns (exit_code, output)."""
+        tmpdir = tempfile.mkdtemp(prefix="velox-aur-")
+        try:
+            git_url = self.AUR_GIT.format(name)
+            try:
+                clone = subprocess.run(
+                    ["git", "clone", "--depth=1", git_url, tmpdir],
+                    capture_output=True, text=True, timeout=60
+                )
+            except subprocess.TimeoutExpired:
+                return self.TIMEOUT, "Could not reach AUR git server (clone timed out)."
+            if clone.returncode != 0:
+                return 3, f"Failed to clone AUR repo:\n{clone.stderr}"
+            pkgbuild = os.path.join(tmpdir, "PKGBUILD")
+            if not os.path.exists(pkgbuild):
+                return 3, "PKGBUILD not found in AUR repo."
+            try:
+                check = subprocess.run(
+                    ["velox-pkgcheck", pkgbuild],
+                    capture_output=True, text=True, timeout=60
+                )
+            except subprocess.TimeoutExpired:
+                return self.TIMEOUT, "velox-pkgcheck scan timed out."
+            return check.returncode, check.stdout + check.stderr
+        except Exception as e:
+            return 3, str(e)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def install(self, name: str) -> tuple[bool, str]:
+        result = subprocess.run(
+            ["paru", "-S", "--noconfirm", "--needed", "--skipreview", name],
+            capture_output=True, text=True
+        )
+        return result.returncode == 0, result.stdout + result.stderr
+
+
+class FlatpakBackend:
+    def __init__(self):
+        self._inst = Flatpak.Installation.new_system(None)
+
+    def search(self, query: str) -> list[Package]:
+        try:
+            result = subprocess.run(
+                ["flatpak", "search", "--columns=application,name,version,description,remotes", query],
+                capture_output=True, text=True, timeout=15
+            )
+            packages = []
+            installed_refs = {r.get_name() for r in self._inst.list_installed_refs()}
+            for line in result.stdout.strip().splitlines():
+                parts = line.split("\t")
+                if len(parts) < 4:
+                    continue
+                app_id, name, version, description = parts[0], parts[1], parts[2], parts[3]
+                packages.append(Package(
+                    name=name,
+                    version=version,
+                    description=description,
+                    source="flatpak",
+                    installed=app_id in installed_refs,
+                    icon_name=app_id.split(".")[-1].lower(),
+                    flatpak_ref=app_id,
+                    url=f"https://flathub.org/apps/{app_id}",
+                ))
+            return packages
+        except Exception:
+            return []
+
+    def install(self, ref: str) -> tuple[bool, str]:
+        result = subprocess.run(
+            ["flatpak", "install", "--system", "--noninteractive", "-y", "flathub", ref],
+            capture_output=True, text=True
+        )
+        return result.returncode == 0, result.stdout + result.stderr
+
+    def remove(self, ref: str) -> tuple[bool, str]:
+        result = subprocess.run(
+            ["flatpak", "uninstall", "--noninteractive", "-y", ref],
+            capture_output=True, text=True
+        )
+        return result.returncode == 0, result.stdout + result.stderr
+
+
+def _fmt_size(b: int) -> str:
+    if not b:
+        return ""
+    for unit in ("B", "KB", "MB", "GB"):
+        if b < 1024:
+            return f"{b:.1f} {unit}"
+        b /= 1024
+    return f"{b:.1f} TB"
+
+# ── Worker threads ────────────────────────────────────────────────────────────
+
+class SearchWorker(QThread):
+    result = pyqtSignal(list)
+    error  = pyqtSignal(str)
+
+    def __init__(self, query, backends, sources):
+        super().__init__()
+        self.query = query
+        self.backends = backends
+        self.sources = sources
+
+    def run(self):
+        all_results = []
+        for source, backend in self.backends.items():
+            if source not in self.sources:
+                continue
+            try:
+                all_results.extend(backend.search(self.query))
+            except Exception as e:
+                self.error.emit(f"{source}: {e}")
+        self.result.emit(all_results)
+
+
+class PkgCheckWorker(QThread):
+    done = pyqtSignal(int, str)
+
+    def __init__(self, aur_backend, name):
+        super().__init__()
+        self.aur = aur_backend
+        self.name = name
+
+    def run(self):
+        code, output = self.aur.pkgcheck(self.name)
+        self.done.emit(code, output)
+
+
+class InstallWorker(QThread):
+    done = pyqtSignal(bool, str)
+
+    def __init__(self, pkg, backends):
+        super().__init__()
+        self.pkg = pkg
+        self.backends = backends
+
+    def run(self):
+        p = self.pkg
+        if p.source == "pacman":
+            ok, out = self.backends["pacman"].install(p.name)
+        elif p.source == "aur":
+            ok, out = self.backends["aur"].install(p.name)
+        elif p.source == "flatpak":
+            ok, out = self.backends["flatpak"].install(p.flatpak_ref or p.name)
+        else:
+            ok, out = False, "Unknown source"
+        self.done.emit(ok, out)
+
+
+class RemoveWorker(QThread):
+    done = pyqtSignal(bool, str)
+
+    def __init__(self, pkg, backends):
+        super().__init__()
+        self.pkg = pkg
+        self.backends = backends
+
+    def run(self):
+        p = self.pkg
+        if p.source == "pacman":
+            ok, out = self.backends["pacman"].remove(p.name)
+        elif p.source == "flatpak":
+            ok, out = self.backends["flatpak"].remove(p.flatpak_ref or p.name)
+        else:
+            ok, out = False, "AUR packages must be removed via pacman."
+        self.done.emit(ok, out)
+
+class TerminalWorker(QThread):
+    line_ready  = pyqtSignal(str)
+    finished_ok = pyqtSignal(bool)
+
+    def __init__(self, cmd: list):
+        super().__init__()
+        self.cmd = cmd
+
+    def run(self):
+        try:
+            proc = subprocess.Popen(
+                self.cmd, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, text=True, bufsize=1
+            )
+            for line in proc.stdout:
+                self.line_ready.emit(line.rstrip())
+            proc.wait()
+            self.finished_ok.emit(proc.returncode == 0)
+        except Exception as e:
+            self.line_ready.emit(f"Error: {e}")
+            self.finished_ok.emit(False)
+
+class UpdateCheckWorker(QThread):
+    done = pyqtSignal(list, list)   # (pacman_updates, flatpak_updates)
+
+    def __init__(self, flatpak_backend):
+        super().__init__()
+        self._flatpak = flatpak_backend
+
+    def run(self):
+        pacman_updates = []
+        try:
+            cmd = ["checkupdates"] if shutil.which("checkupdates") else ["pacman", "-Qu"]
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            for line in r.stdout.strip().splitlines():
+                parts = line.split()
+                if len(parts) >= 4:
+                    pacman_updates.append((parts[0], parts[1], parts[3]))
+        except Exception:
+            pass
+
+        flatpak_updates = []
+        if self._flatpak:
+            try:
+                subprocess.run(["flatpak", "update", "--appstream", "-y"],
+                               capture_output=True, text=True, timeout=30)
+                for ref in self._flatpak._inst.list_installed_refs():
+                    try:
+                        rref = self._flatpak._inst.fetch_remote_ref_sync(
+                            ref.get_remote_name(), Flatpak.RefKind.APP,
+                            ref.get_name(), ref.get_arch(), ref.get_branch(), None
+                        )
+                        if rref and rref.get_commit() != ref.get_commit():
+                            flatpak_updates.append((
+                                ref.get_appdata_name() or ref.get_name(),
+                                ref.get_appdata_version() or "", ""
+                            ))
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        self.done.emit(pacman_updates, flatpak_updates)
+
+# ── Package card widget ───────────────────────────────────────────────────────
+
+CARD_STYLE = f"""
+PackageCard {{
+    background: {CARD_BG}; border-radius: 14px; border: 1px solid #323232;
+}}
+PackageCard:hover {{ border: 1px solid {GREEN}55; background: #2e2e2e; }}
+QLabel#card_name {{ font-size: 12px; font-weight: 600; color: {TEXT}; }}
+QLabel#card_desc {{ font-size: 10px; color: {SUBTEXT}; }}
+QLabel#card_inst {{ color: {GREEN}; font-size: 10px; font-weight: 600; }}
+"""
+
+BADGE_STYLES = {
+    "pacman":  f"background:{BADGE_PACMAN}22;color:{BADGE_PACMAN};border-radius:8px;font-size:9px;font-weight:600;padding:2px 7px;",
+    "aur":     f"background:{BADGE_AUR}22;color:{BADGE_AUR};border-radius:8px;font-size:9px;font-weight:600;padding:2px 7px;",
+    "flatpak": f"background:{BADGE_FLATPAK}22;color:{BADGE_FLATPAK};border-radius:8px;font-size:9px;font-weight:600;padding:2px 7px;",
+}
+
+class PackageCard(QFrame):
+    clicked = pyqtSignal(object)
+
+    def __init__(self, pkg: Package, parent=None):
+        super().__init__(parent)
+        self.pkg = pkg
+        self.setFixedSize(200, 220)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setStyleSheet(CARD_STYLE)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(6)
+
+        # Icon — show fallback immediately; async loader replaces it
+        self._icon_label = QLabel()
+        self._icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._icon_label.setFixedHeight(56)
+        self._icon_label.setPixmap(_fallback_icon(pkg.source, 56))
+        layout.addWidget(self._icon_label)
+
+        name_label = QLabel(pkg.name)
+        name_label.setObjectName("card_name")
+        name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        name_label.setWordWrap(True)
+        layout.addWidget(name_label)
+
+        desc = pkg.description[:70] + "…" if len(pkg.description) > 70 else pkg.description
+        desc_label = QLabel(desc)
+        desc_label.setObjectName("card_desc")
+        desc_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        desc_label.setWordWrap(True)
+        layout.addWidget(desc_label)
+
+        layout.addStretch()
+
+        badge = QLabel(pkg.source.upper())
+        badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        badge.setStyleSheet(BADGE_STYLES.get(pkg.source, ""))
+        badge.setFixedHeight(18)
+        layout.addWidget(badge)
+
+        if pkg.installed:
+            inst = QLabel("✓ Installed")
+            inst.setObjectName("card_inst")
+            inst.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(inst)
+
+    def set_icon(self, px: QPixmap):
+        self._icon_label.setPixmap(px.scaled(56, 56, Qt.AspectRatioMode.KeepAspectRatio,
+                                             Qt.TransformationMode.SmoothTransformation))
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit(self.pkg)
+
+# ── Package detail view ───────────────────────────────────────────────────────
+
+class PackageDetailView(QWidget):
+    install_requested = pyqtSignal(object)
+    remove_requested  = pyqtSignal(object)
+    back_requested    = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._pkg = None
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(30, 20, 30, 20)
+        layout.setSpacing(16)
+
+        # Back button
+        back_btn = QPushButton("← Back")
+        back_btn.setObjectName("secondary")
+        back_btn.setFixedWidth(90)
+        back_btn.clicked.connect(self.back_requested)
+        layout.addWidget(back_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        # Header
+        header = QHBoxLayout()
+        self._icon_label = QLabel()
+        self._icon_label.setFixedSize(80, 80)
+        header.addWidget(self._icon_label)
+
+        info = QVBoxLayout()
+        info.setSpacing(4)
+        self._name_label = QLabel()
+        self._name_label.setObjectName("heading")
+        info.addWidget(self._name_label)
+
+        self._version_label = QLabel()
+        self._version_label.setObjectName("subheading")
+        info.addWidget(self._version_label)
+
+        self._source_label = QLabel()
+        self._source_label.setStyleSheet("font-size: 12px;")
+        info.addWidget(self._source_label)
+
+        header.addLayout(info)
+        header.addStretch()
+
+        # Action buttons
+        btn_layout = QVBoxLayout()
+        btn_layout.setSpacing(8)
+        self._install_btn = QPushButton("Install")
+        self._install_btn.setFixedWidth(120)
+        self._install_btn.clicked.connect(lambda: self.install_requested.emit(self._pkg))
+        btn_layout.addWidget(self._install_btn)
+
+        self._remove_btn = QPushButton("Remove")
+        self._remove_btn.setObjectName("danger")
+        self._remove_btn.setFixedWidth(120)
+        self._remove_btn.clicked.connect(lambda: self.remove_requested.emit(self._pkg))
+        btn_layout.addWidget(self._remove_btn)
+
+        header.addLayout(btn_layout)
+        layout.addLayout(header)
+
+        # Separator
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color: #383838;")
+        layout.addWidget(sep)
+
+        # Description
+        desc_heading = QLabel("Description")
+        desc_heading.setStyleSheet(f"font-size: 15px; font-weight: bold; color: {TEXT};")
+        layout.addWidget(desc_heading)
+
+        self._desc_label = QLabel()
+        self._desc_label.setWordWrap(True)
+        self._desc_label.setStyleSheet(f"font-size: 13px; color: {TEXT}; line-height: 1.5;")
+        layout.addWidget(self._desc_label)
+
+        # Extra info
+        self._extra_label = QLabel()
+        self._extra_label.setStyleSheet(f"font-size: 12px; color: {SUBTEXT};")
+        layout.addWidget(self._extra_label)
+
+        layout.addStretch()
+
+    def show_package(self, pkg: Package):
+        self._pkg = pkg
+
+        px = load_icon(pkg.icon_name, pkg.source, 80)
+        self._icon_label.setPixmap(px)
+
+        self._name_label.setText(pkg.name)
+        self._version_label.setText(f"Version: {pkg.version}")
+
+        badge_colors = {"pacman": BADGE_PACMAN, "aur": BADGE_AUR, "flatpak": BADGE_FLATPAK}
+        color = badge_colors.get(pkg.source, GREEN)
+        self._source_label.setText(
+            f'<span style="background:{color};color:#fff;padding:2px 8px;'
+            f'border-radius:4px;">{pkg.source.upper()}</span>'
+        )
+
+        self._desc_label.setText(pkg.description or "No description available.")
+
+        extras = []
+        if pkg.size:
+            extras.append(f"Installed size: {pkg.size}")
+        if pkg.url:
+            extras.append(f"URL: {pkg.url}")
+        if pkg.votes:
+            extras.append(f"AUR votes: {pkg.votes}")
+        self._extra_label.setText("   •   ".join(extras))
+
+        if pkg.installed:
+            self._install_btn.setText("Reinstall")
+            self._install_btn.setEnabled(True)
+            self._remove_btn.setVisible(True)
+        else:
+            self._install_btn.setText("Install")
+            self._install_btn.setEnabled(True)
+            self._remove_btn.setVisible(False)
+
+        if pkg.source == "aur":
+            self._remove_btn.setVisible(pkg.installed)
+
+    def set_buttons_enabled(self, enabled: bool):
+        self._install_btn.setEnabled(enabled)
+        self._remove_btn.setEnabled(enabled)
+
+# ── Main window ───────────────────────────────────────────────────────────────
+
+class VeloxStore(QMainWindow):
+    NAV_HOME      = 0
+    NAV_INSTALLED = 1
+    NAV_UPDATES   = 2
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Velox Control Center")
+        self.setMinimumSize(1100, 700)
+        self.resize(1200, 780)
+        self.setWindowIcon(QIcon.fromTheme("system-software-install"))
+
+        self._active_sources = {"pacman", "aur", "flatpak"}
+        self._search_worker = None
+        self._install_worker = None
+        self._pkgcheck_worker = None
+        self._current_results = []
+
+        # Init backends
+        self._backends = {}
+        try:
+            self._backends["pacman"] = PacmanBackend()
+        except Exception as e:
+            print(f"pacman backend failed: {e}")
+        try:
+            self._backends["aur"] = AURBackend()
+        except Exception as e:
+            print(f"AUR backend failed: {e}")
+        try:
+            self._backends["flatpak"] = FlatpakBackend()
+        except Exception as e:
+            print(f"Flatpak backend failed: {e}")
+
+        self._build_ui()
+        self._show_home()
+
+    def _build_ui(self):
+        self.setStyleSheet(STYLESHEET)
+        central = QWidget()
+        self.setCentralWidget(central)
+        root = QHBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # ── Sidebar ───────────────────────────────────────────────────────────
+        sidebar = QWidget()
+        sidebar.setFixedWidth(200)
+        sidebar.setStyleSheet(f"background: #1a1a1a; border-right: 1px solid #282828;")
+        sb_layout = QVBoxLayout(sidebar)
+        sb_layout.setContentsMargins(8, 24, 8, 20)
+        sb_layout.setSpacing(2)
+
+        # Logo image
+        _icon_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icons")
+        logo_px = QPixmap(os.path.join(_icon_dir, "velox-logo.png"))
+        logo_img = QLabel()
+        logo_img.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        if not logo_px.isNull():
+            logo_img.setPixmap(
+                logo_px.scaled(120, 120, Qt.AspectRatioMode.KeepAspectRatio,
+                               Qt.TransformationMode.SmoothTransformation)
+            )
+        sb_layout.addWidget(logo_img)
+
+        logo_txt = QLabel("Control Center")
+        logo_txt.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        logo_txt.setStyleSheet(
+            f"font-size: 13px; font-weight: 700; color: {GREEN};"
+            "padding: 4px 6px 16px 6px; letter-spacing: 1px;"
+        )
+        sb_layout.addWidget(logo_txt)
+
+        def _sb_section(text):
+            lbl = QLabel(text)
+            lbl.setStyleSheet(
+                f"font-size: 9px; color: {SUBTEXT}; padding: 10px 6px 4px 6px; letter-spacing: 1.5px;"
+            )
+            sb_layout.addWidget(lbl)
+
+        def _sb_sep():
+            sep = QFrame()
+            sep.setFrameShape(QFrame.Shape.HLine)
+            sep.setStyleSheet("color: #282828; margin: 6px 0;")
+            sb_layout.addWidget(sep)
+
+        self._nav_group = QButtonGroup(self)
+        self._nav_group.setExclusive(True)
+
+        def _nav_btn(label, nav_id):
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setStyleSheet(NAV_BTN_STYLE)
+            btn.setMinimumHeight(36)
+            self._nav_group.addButton(btn, nav_id)
+            sb_layout.addWidget(btn)
+            return btn
+
+        def _tool_btn(label, slot):
+            btn = QPushButton(label)
+            btn.setStyleSheet(NAV_TOOL_BTN_STYLE)
+            btn.setMinimumHeight(36)
+            btn.clicked.connect(slot)
+            sb_layout.addWidget(btn)
+            return btn
+
+        _sb_section("SOFTWARE")
+        self._nav_home_btn = _nav_btn("🏠  Home",       0)
+        _nav_btn("✅  Installed",  1)
+        _nav_btn("🔄  Updates",    2)
+
+        _sb_sep()
+        _sb_section("SYSTEM")
+        _nav_btn("🖥️  Desktops",   3)
+        _nav_btn("🐧  Kernels",    4)
+        _nav_btn("🎮  GPU Drivers", 6)
+        _nav_btn("📸  Snapshots",  5)
+
+        _sb_sep()
+        _sb_section("TOOLS")
+        _tool_btn("🔑  Fix Keyrings",    self._run_fix_keyrings)
+
+        _sb_sep()
+        _sb_section("SOURCES")
+        self._src_checks = {}
+        for src, label in [("pacman", "Pacman / Chaotic"), ("aur", "AUR"), ("flatpak", "Flatpak")]:
+            cb = QCheckBox(label)
+            cb.setChecked(True)
+            cb.setStyleSheet(f"color: {TEXT}; font-size: 12px; padding: 4px 6px;")
+            cb.toggled.connect(lambda checked, s=src: self._toggle_source(s, checked))
+            self._src_checks[src] = cb
+            sb_layout.addWidget(cb)
+
+        sb_layout.addStretch()
+        self._nav_group.idClicked.connect(self._on_nav_id)
+        self._nav_home_btn.setChecked(True)
+        root.addWidget(sidebar)
+
+        # ── Main content ──────────────────────────────────────────────────────
+        content_widget = QWidget()
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+
+        # Search bar
+        search_bar = QWidget()
+        search_bar.setStyleSheet("background: #222; border-bottom: 1px solid #333;")
+        search_bar.setFixedHeight(64)
+        search_layout = QHBoxLayout(search_bar)
+        search_layout.setContentsMargins(20, 12, 20, 12)
+
+        self._search_edit = QLineEdit()
+        self._search_edit.setPlaceholderText("Search packages…")
+        self._search_edit.returnPressed.connect(self._do_search)
+        search_layout.addWidget(self._search_edit)
+
+        search_btn = QPushButton("Search")
+        search_btn.setFixedWidth(90)
+        search_btn.clicked.connect(self._do_search)
+        search_layout.addWidget(search_btn)
+
+        content_layout.addWidget(search_bar)
+
+        # Stacked pages
+        self._stack = QStackedWidget()
+
+        # Page 0: Home
+        self._home_page = self._build_home_page()
+        self._stack.addWidget(self._home_page)
+
+        # Page 1: Results
+        self._results_page = self._build_results_page()
+        self._stack.addWidget(self._results_page)
+
+        # Page 2: Package detail
+        self._detail_view = PackageDetailView()
+        self._detail_view.install_requested.connect(self._on_install)
+        self._detail_view.remove_requested.connect(self._on_remove)
+        self._detail_view.back_requested.connect(self._on_back)
+        self._stack.addWidget(self._detail_view)
+
+        # Page 3: Desktops
+        self._desktops_page = self._build_desktops_page()
+        self._stack.addWidget(self._desktops_page)
+
+        # Page 4: Kernels
+        self._kernels_page = self._build_kernels_page()
+        self._stack.addWidget(self._kernels_page)
+
+        # Page 5: Snapshots
+        self._snapshots_page = self._build_snapshots_page()
+        self._stack.addWidget(self._snapshots_page)
+
+        # Page 6: Terminal output (shared for Fix Keyrings / system actions)
+        self._terminal_page = self._build_terminal_page()
+        self._stack.addWidget(self._terminal_page)
+
+        # Page 7: Updates
+        self._updates_page = self._build_updates_page()
+        self._stack.addWidget(self._updates_page)
+
+        # Page 8: GPU Drivers
+        self._gpu_page = self._build_gpu_page()
+        self._stack.addWidget(self._gpu_page)
+
+        content_layout.addWidget(self._stack)
+        root.addWidget(content_widget)
+
+    # Categories: { label: [(display_name, search_query, icon_name, source), ...] }
+    CATEGORIES = {
+        "🌐  Browsers": [
+            ("Firefox",    "firefox",          "firefox",         "pacman"),
+            ("Chromium",   "chromium",         "chromium",        "pacman"),
+            ("Brave",      "brave-bin",        "brave",           "aur"),
+            ("Zen",        "zen-browser-bin",  "zen-browser",     "aur"),
+        ],
+        "📄  Office & Productivity": [
+            ("LibreOffice",  "libreoffice-fresh",    "libreoffice-startcenter", "pacman"),
+            ("OnlyOffice",   "onlyoffice-bin",       "onlyoffice-desktopeditors","aur"),
+            ("Thunderbird",  "thunderbird",          "thunderbird",             "pacman"),
+            ("Obsidian",     "obsidian",             "obsidian",                "flatpak"),
+        ],
+        "🎬  Media & Entertainment": [
+            ("VLC",        "vlc",             "vlc",             "pacman"),
+            ("MPV",        "mpv",             "mpv",             "pacman"),
+            ("Spotify",    "spotify",         "spotify",         "flatpak"),
+            ("Celluloid",  "celluloid",       "io.github.celluloid_player.Celluloid", "pacman"),
+        ],
+        "🎮  Gaming": [
+            ("Steam",      "steam",           "steam",           "pacman"),
+            ("Lutris",     "lutris",          "lutris",          "pacman"),
+            ("Heroic",     "heroic-games-launcher-bin", "heroic","aur"),
+            ("Bottles",    "bottles",         "com.usebottles.bottles", "flatpak"),
+            ("Discord",    "discord",         "discord",         "pacman"),
+            ("MangoHud",   "mangohud",        "mangohud",        "pacman"),
+        ],
+        "🎨  Creative & Graphics": [
+            ("GIMP",       "gimp",            "gimp",            "pacman"),
+            ("Inkscape",   "inkscape",        "inkscape",        "pacman"),
+            ("Kdenlive",   "kdenlive",        "kdenlive",        "pacman"),
+            ("OBS Studio", "obs-studio",      "obs",             "pacman"),
+            ("Blender",    "blender",         "blender",         "pacman"),
+            ("Krita",      "krita",           "krita",           "pacman"),
+        ],
+        "💻  Development": [
+            ("VS Code",    "visual-studio-code-bin", "code",     "aur"),
+            ("Kate",       "kate",            "kate",            "pacman"),
+            ("Gittyup",    "gittyup",         "gittyup",         "pacman"),
+            ("PyCharm",    "pycharm-community-edition", "pycharm","flatpak"),
+            ("Neovim",     "neovim",          "nvim",            "pacman"),
+        ],
+        "⚙️  KDE & System": [
+            ("KDE Connect",    "kdeconnect",    "kdeconnect",    "pacman"),
+            ("Filelight",      "filelight",     "filelight",     "pacman"),
+            ("GParted",        "gparted",       "gparted",       "pacman"),
+            ("Timeshift",      "timeshift",     "timeshift",     "aur"),
+            ("Ventoy",         "ventoy",        "ventoy",        "aur"),
+        ],
+    }
+
+    def _build_home_page(self):
+        page = QScrollArea()
+        page.setWidgetResizable(True)
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
+        layout.setContentsMargins(30, 30, 30, 30)
+        layout.setSpacing(20)
+
+        title = QLabel("Welcome to Velox Store")
+        title.setObjectName("heading")
+        layout.addWidget(title)
+
+        subtitle = QLabel("Search for apps from pacman, AUR, Chaotic-AUR and Flatpak in one place.")
+        subtitle.setObjectName("subheading")
+        layout.addWidget(subtitle)
+
+        # AUR security banner
+        sec_banner = QFrame()
+        sec_banner.setStyleSheet(
+            f"background: #1a2a1a; border-radius: 10px; border: 1px solid {GREEN};"
+        )
+        sec_layout = QHBoxLayout(sec_banner)
+        sec_layout.setContentsMargins(16, 12, 16, 12)
+        shield = QLabel("🛡")
+        shield.setStyleSheet("font-size: 28px;")
+        sec_layout.addWidget(shield)
+        sec_text = QVBoxLayout()
+        sec_title = QLabel("AUR packages are secured by velox-pkgcheck")
+        sec_title.setStyleSheet(f"font-size: 13px; font-weight: bold; color: {GREEN};")
+        sec_text.addWidget(sec_title)
+        sec_sub = QLabel(
+            "Every AUR package is scanned for supply-chain attacks, malicious scripts "
+            "and known bad maintainers before installation."
+        )
+        sec_sub.setWordWrap(True)
+        sec_sub.setStyleSheet(f"font-size: 12px; color: {SUBTEXT};")
+        sec_text.addWidget(sec_sub)
+        sec_layout.addLayout(sec_text)
+        layout.addWidget(sec_banner)
+
+        # Source info cards
+        tips_layout = QHBoxLayout()
+        tips_layout.setSpacing(12)
+        for src, color, tip in [
+            ("pacman / Chaotic-AUR", BADGE_PACMAN, "Official Arch repos + Chaotic-AUR pre-built packages"),
+            ("AUR", BADGE_AUR, "Community packages — scanned by velox-pkgcheck before install"),
+            ("Flatpak", BADGE_FLATPAK, "Sandboxed apps from Flathub"),
+        ]:
+            card = QFrame()
+            card.setStyleSheet(f"background: {CARD_BG}; border-radius: 10px; border-left: 4px solid {color};")
+            cl = QVBoxLayout(card)
+            cl.setContentsMargins(14, 12, 14, 12)
+            QLabel(src, styleSheet=f"font-weight:bold;font-size:13px;color:{color};", parent=card)
+            cl.addWidget(card.findChildren(QLabel)[-1])
+            tip_lbl = QLabel(tip)
+            tip_lbl.setWordWrap(True)
+            tip_lbl.setStyleSheet(f"font-size: 11px; color: {SUBTEXT};")
+            cl.addWidget(tip_lbl)
+            tips_layout.addWidget(card)
+        layout.addLayout(tips_layout)
+
+        # Featured apps
+        feat_label = QLabel("Popular Apps")
+        feat_label.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {TEXT}; margin-top: 8px;")
+        layout.addWidget(feat_label)
+
+        self._feat_icon_labels: dict[str, QLabel] = {}
+        all_icon_tasks: list[tuple[str, str, int]] = []
+
+        for category, apps in self.CATEGORIES.items():
+            hdr = QWidget()
+            hdr_row = QHBoxLayout(hdr)
+            hdr_row.setContentsMargins(0, 20, 0, 8)
+            hdr_row.setSpacing(12)
+            cat_label = QLabel(category)
+            cat_label.setStyleSheet(
+                f"font-size: 22px; font-weight: 800; color: {TEXT};"
+            )
+            hdr_row.addWidget(cat_label)
+            sep = QFrame()
+            sep.setFrameShape(QFrame.Shape.HLine)
+            sep.setStyleSheet("color: #383838;")
+            hdr_row.addWidget(sep)
+            layout.addWidget(hdr)
+
+            row_widget = QWidget()
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(10)
+
+            for name, query, icon_name, source in apps:
+                btn = QFrame()
+                btn.setFixedSize(140, 64)
+                btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn.setStyleSheet(
+                    f"background:#232323;border-radius:12px;border:1px solid #2e2e2e;"
+                )
+                btn_layout = QHBoxLayout(btn)
+                btn_layout.setContentsMargins(10, 8, 10, 8)
+                btn_layout.setSpacing(9)
+
+                icon_lbl = QLabel()
+                icon_lbl.setFixedSize(32, 32)
+                icon_lbl.setPixmap(_fallback_icon(source, 32))
+                cache_key = f"{source}:{icon_name}"
+                self._feat_icon_labels[cache_key] = icon_lbl
+                btn_layout.addWidget(icon_lbl)
+
+                txt = QVBoxLayout()
+                txt.setSpacing(3)
+                nl = QLabel(name)
+                nl.setStyleSheet(f"font-size: 11px; font-weight: 600; color: {TEXT};")
+                nl.setWordWrap(True)
+                txt.addWidget(nl)
+                badge_color = {"pacman": BADGE_PACMAN, "aur": BADGE_AUR, "flatpak": BADGE_FLATPAK}.get(source, GREEN)
+                sl = QLabel(source.upper())
+                sl.setStyleSheet(
+                    f"font-size: 8px; font-weight: 600; color: {badge_color};"
+                    f"background: {badge_color}22; border-radius: 6px; padding: 1px 5px;"
+                )
+                txt.addWidget(sl)
+                btn_layout.addLayout(txt)
+
+                btn.mousePressEvent = lambda e, q=query: self._featured_search(q)
+                row_layout.addWidget(btn)
+
+                all_icon_tasks.append((icon_name, source, 36))
+
+            row_layout.addStretch()
+            layout.addWidget(row_widget)
+
+        layout.addStretch()
+        page.setWidget(inner)
+
+        # Load all category icons in background
+        self._feat_icon_loader = IconLoader(all_icon_tasks)
+        self._feat_icon_loader.icon_ready.connect(self._on_feat_icon_ready)
+        self._feat_icon_loader.start()
+
+        return page
+
+    def _featured_search(self, query: str):
+        self._search_edit.setText(query)
+        self._do_search()
+
+    def _on_feat_icon_ready(self, name: str, source: str, size: int, px: QPixmap):
+        lbl = self._feat_icon_labels.get(f"{source}:{name}")
+        if lbl:
+            lbl.setPixmap(px.scaled(36, 36, Qt.AspectRatioMode.KeepAspectRatio,
+                                    Qt.TransformationMode.SmoothTransformation))
+
+    def _build_results_page(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(12)
+
+        header_row = QHBoxLayout()
+        back_btn = QPushButton("← Home")
+        back_btn.setObjectName("secondary")
+        back_btn.setFixedWidth(90)
+        back_btn.clicked.connect(self._show_home)
+        header_row.addWidget(back_btn)
+        header_row.addSpacing(12)
+
+        self._results_header = QLabel("Results")
+        self._results_header.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {TEXT};")
+        header_row.addWidget(self._results_header)
+        header_row.addStretch()
+        layout.addLayout(header_row)
+
+        self._status_label = QLabel("")
+        self._status_label.setStyleSheet(f"color: {SUBTEXT}; font-size: 12px;")
+        layout.addWidget(self._status_label)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        self._results_inner = QWidget()
+        self._results_layout = QVBoxLayout(self._results_inner)
+        self._results_layout.setContentsMargins(0, 0, 0, 0)
+        self._results_layout.setSpacing(4)
+        self._results_layout.addStretch()
+        scroll.setWidget(self._results_inner)
+        layout.addWidget(scroll)
+        return widget
+
+    # ── Navigation ────────────────────────────────────────────────────────────
+
+    def _show_home(self):
+        self._stack.setCurrentIndex(0)
+
+    _COLS = 5
+
+    _SOURCE_META = {
+        "pacman":  ("Pacman",  BADGE_PACMAN,  ""),
+        "aur":     ("AUR",     BADGE_AUR,     ""),
+        "flatpak": ("Flatpak", BADGE_FLATPAK, ""),
+    }
+
+    def _make_source_header(self, source: str) -> QWidget:
+        label, color, _ = self._SOURCE_META.get(source, (source.upper(), GREEN, ""))
+        w = QWidget()
+        row = QHBoxLayout(w)
+        row.setContentsMargins(0, 20, 0, 8)
+        row.setSpacing(14)
+
+        # Source icon — load bundled SVG, fall back to colored initial pill
+        icon_label = QLabel()
+        icon_label.setFixedSize(48, 48)
+        icon_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icons")
+        icon_path = os.path.join(icon_dir, f"{source}.svg")
+        px = QPixmap(icon_path) if os.path.exists(icon_path) else QPixmap()
+        if not px.isNull():
+            icon_label.setPixmap(
+                px.scaled(48, 48, Qt.AspectRatioMode.KeepAspectRatio,
+                          Qt.TransformationMode.SmoothTransformation)
+            )
+        else:
+            icon_label.setText(label[0])
+            icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            icon_label.setStyleSheet(
+                f"background:{color}; color:#fff; font-size:22px; font-weight:800;"
+                f"border-radius:24px;"
+            )
+        row.addWidget(icon_label)
+
+        name_lbl = QLabel(label)
+        name_lbl.setStyleSheet(
+            f"font-size: 22px; font-weight: 800; color: {color}; letter-spacing: 0.5px;"
+        )
+        row.addWidget(name_lbl)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet(f"color: {color}55;")
+        row.addWidget(sep)
+        return w
+
+    def _show_results(self, packages: list[Package]):
+        # Clear previous content (everything except the trailing stretch)
+        while self._results_layout.count() > 1:
+            item = self._results_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+            elif item.layout():
+                # clear sub-layout
+                while item.layout().count():
+                    sub = item.layout().takeAt(0)
+                    if sub.widget():
+                        sub.widget().deleteLater()
+
+        self._card_map: dict[str, PackageCard] = {}
+
+        capped = packages[:60]
+        if not capped:
+            self._status_label.setText("No packages found.")
+            self._stack.setCurrentIndex(1)
+            return
+
+        self._status_label.setText(f"{len(capped)} package(s) found")
+
+        # Group by source preserving order: pacman → aur → flatpak → other
+        source_order = ["pacman", "aur", "flatpak"]
+        grouped: dict[str, list[Package]] = {}
+        for pkg in capped:
+            grouped.setdefault(pkg.source, []).append(pkg)
+
+        for source in source_order + [s for s in grouped if s not in source_order]:
+            pkgs = grouped.get(source)
+            if not pkgs:
+                continue
+
+            # Section header
+            self._results_layout.insertWidget(
+                self._results_layout.count() - 1,
+                self._make_source_header(source)
+            )
+
+            # Grid container for this source
+            grid_widget = QWidget()
+            grid = QGridLayout(grid_widget)
+            grid.setSpacing(12)
+            grid.setContentsMargins(0, 0, 0, 0)
+            grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+
+            for i, pkg in enumerate(pkgs):
+                card = PackageCard(pkg)
+                card.clicked.connect(self._show_detail)
+                grid.addWidget(card, i // self._COLS, i % self._COLS)
+                self._card_map[f"{pkg.source}:{pkg.name}"] = card
+
+            self._results_layout.insertWidget(
+                self._results_layout.count() - 1,
+                grid_widget
+            )
+
+        self._stack.setCurrentIndex(1)
+
+        # Load icons in background
+        tasks = [(p.icon_name, p.source, 56) for p in capped]
+        self._icon_loader = IconLoader(tasks)
+        self._icon_loader.icon_ready.connect(self._on_icon_ready)
+        self._icon_loader.start()
+
+    def _on_icon_ready(self, name: str, source: str, size: int, px: QPixmap):
+        card = self._card_map.get(f"{source}:{name}")
+        if card:
+            card.set_icon(px)
+
+    def _show_detail(self, pkg: Package):
+        self._detail_view.show_package(pkg)
+        self._stack.setCurrentIndex(2)
+
+    def _on_back(self):
+        self._stack.setCurrentIndex(1 if self._current_results else 0)
+
+    def _on_nav_id(self, nav_id: int):
+        if nav_id == 0:
+            self._show_home()
+        elif nav_id == 1:
+            self._show_installed()
+        elif nav_id == 2:
+            self._show_updates()
+        elif nav_id == 3:
+            self._show_desktops()
+        elif nav_id == 4:
+            self._show_kernels()
+        elif nav_id == 5:
+            self._show_snapshots()
+        elif nav_id == 6:
+            self._show_gpu_drivers()
+
+    # ── Desktops ──────────────────────────────────────────────────────────────
+
+    DESKTOPS = [
+        ("KDE Plasma",  "plasma-desktop",  "plasma-desktop",
+         "Full KDE Plasma desktop — the Velox default"),
+        ("GNOME",       "gnome",           "gnome-shell",
+         "Modern, polished GNOME desktop environment"),
+        ("XFCE",        "xfce4",           "xfce4-session",
+         "Lightweight and fast XFCE desktop"),
+        ("Cinnamon",    "cinnamon",        "cinnamon",
+         "Traditional Linux Mint-style desktop"),
+        ("MATE",        "mate",            "mate-session-manager",
+         "Classic GNOME 2 continuation"),
+        ("LXQt",        "lxqt",            "lxqt-session",
+         "Lightweight Qt-based desktop environment"),
+        ("Hyprland",    "hyprland",        "hyprland",
+         "Modern Wayland tiling compositor"),
+        ("i3",          "i3-wm",           "i3",
+         "Minimalist X11 tiling window manager"),
+        ("Sway",        "sway",            "sway",
+         "Wayland i3-compatible tiling compositor"),
+    ]
+
+    def _build_desktops_page(self):
+        page = QScrollArea()
+        page.setWidgetResizable(True)
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
+        layout.setContentsMargins(30, 24, 30, 24)
+        layout.setSpacing(0)
+
+        hdr = QLabel("Desktop Environments")
+        hdr.setStyleSheet(f"font-size: 22px; font-weight: 800; color: {TEXT}; margin-bottom: 6px;")
+        layout.addWidget(hdr)
+        sub = QLabel("Install additional desktop environments alongside your current one.")
+        sub.setStyleSheet(f"font-size: 12px; color: {SUBTEXT}; margin-bottom: 20px;")
+        layout.addWidget(sub)
+
+        self._desktop_rows: dict[str, dict] = {}
+        for name, pkg, icon_name, desc in self.DESKTOPS:
+            row = self._make_system_row(name, pkg, icon_name, desc, "pacman")
+            self._desktop_rows[pkg] = row
+            layout.addWidget(row["widget"])
+            sep = QFrame()
+            sep.setFrameShape(QFrame.Shape.HLine)
+            sep.setStyleSheet("color: #282828;")
+            layout.addWidget(sep)
+
+        layout.addStretch()
+        page.setWidget(inner)
+        return page
+
+    def _show_desktops(self):
+        self._refresh_system_rows(self._desktop_rows)
+        self._stack.setCurrentIndex(3)
+
+    # ── Kernels ───────────────────────────────────────────────────────────────
+
+    KERNELS = [
+        ("Linux Velox",    "linux-velox",    "linux-velox",
+         "Velox custom kernel with performance patches"),
+        ("Linux",          "linux",          "linux",
+         "Standard Arch Linux kernel"),
+        ("Linux LTS",      "linux-lts",      "linux-lts",
+         "Long-term support — stable and conservative"),
+        ("Linux Zen",      "linux-zen",      "linux-zen",
+         "Zen kernel optimized for desktop responsiveness"),
+        ("Linux Hardened", "linux-hardened", "linux-hardened",
+         "Security-hardened kernel with extra protections"),
+        ("Linux RT",       "linux-rt",       "linux-rt",
+         "Real-time kernel for audio/video production"),
+    ]
+
+    def _build_kernels_page(self):
+        page = QScrollArea()
+        page.setWidgetResizable(True)
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
+        layout.setContentsMargins(30, 24, 30, 24)
+        layout.setSpacing(0)
+
+        hdr = QLabel("Kernels")
+        hdr.setStyleSheet(f"font-size: 22px; font-weight: 800; color: {TEXT}; margin-bottom: 6px;")
+        layout.addWidget(hdr)
+        sub = QLabel("Install additional kernels. A reboot is required to switch.")
+        sub.setStyleSheet(f"font-size: 12px; color: {SUBTEXT}; margin-bottom: 20px;")
+        layout.addWidget(sub)
+
+        self._kernel_rows: dict[str, dict] = {}
+        running = os.uname().release
+        for name, pkg, icon_name, desc in self.KERNELS:
+            is_running = pkg.replace("linux-", "").replace("-", "-") in running
+            extra = " — currently running" if is_running else ""
+            row = self._make_system_row(name, pkg, "cpu", desc + extra, "pacman")
+            self._kernel_rows[pkg] = row
+            layout.addWidget(row["widget"])
+            sep = QFrame()
+            sep.setFrameShape(QFrame.Shape.HLine)
+            sep.setStyleSheet("color: #282828;")
+            layout.addWidget(sep)
+
+        layout.addStretch()
+        page.setWidget(inner)
+        return page
+
+    def _show_kernels(self):
+        self._refresh_system_rows(self._kernel_rows)
+        self._stack.setCurrentIndex(4)
+
+    # ── GPU Drivers ───────────────────────────────────────────────────────────
+
+    GPU_NVIDIA = [
+        ("NVIDIA Open (RTX 20xx+)",  "nvidia-open-dkms",   "Open-source kernel module for modern NVIDIA GPUs"),
+        ("NVIDIA Proprietary",        "nvidia-dkms",        "Proprietary driver for older NVIDIA cards"),
+        ("NVIDIA Utils",              "nvidia-utils",       "NVIDIA driver utilities and libraries"),
+        ("NVIDIA Settings",           "nvidia-settings",    "GTK GUI for NVIDIA GPU configuration"),
+        ("lib32 NVIDIA Utils",        "lib32-nvidia-utils", "32-bit NVIDIA libs for Steam / Wine"),
+        ("OpenCL NVIDIA",             "opencl-nvidia",      "OpenCL compute support for NVIDIA"),
+    ]
+
+    GPU_AMD = [
+        ("Mesa (AMD/Intel)",          "mesa",               "Open-source graphics library — required for AMD/Intel"),
+        ("lib32 Mesa",                "lib32-mesa",         "32-bit Mesa for Steam / Wine"),
+        ("Vulkan Radeon (RADV)",      "vulkan-radeon",      "Mesa Vulkan driver for AMD GPUs"),
+        ("AMDVLK",                    "amdvlk",             "AMD's official open-source Vulkan driver"),
+        ("ROCm OpenCL",               "rocm-opencl-runtime","AMD GPU compute via OpenCL / ROCm"),
+        ("AMDGPU Pro (Chaotic)",      "amdgpu-pro-oglp",    "AMD hybrid proprietary OpenGL layer"),
+    ]
+
+    GPU_INTEL = [
+        ("Mesa (AMD/Intel)",          "mesa",               "Open-source graphics library — required for Intel"),
+        ("Vulkan Intel (ANV)",        "vulkan-intel",       "Intel Vulkan driver"),
+        ("Intel Media Driver",        "intel-media-driver", "VA-API hardware video acceleration (Gen 8+)"),
+        ("lib32 Mesa",                "lib32-mesa",         "32-bit Mesa for Steam / Wine"),
+    ]
+
+    GPU_SOFTWARE = [
+        ("MangoHud",       "mangohud",      "mangohud",      "FPS / perf overlay for Vulkan & OpenGL games"),
+        ("GreenWithEnvy",  "gwe",           "gwe",           "NVIDIA GPU fan control and overclocking"),
+        ("CoreCtrl",       "corectrl",      "corectrl",      "AMD GPU and CPU control (fan curves, OC)"),
+        ("nvtop",          "nvtop",         "nvtop",         "GPU process monitor — like htop for GPUs"),
+        ("Vulkan Tools",   "vulkan-tools",  "vulkan-tools",  "vulkaninfo and vkcube for testing Vulkan"),
+        ("GPU Viewer",     "gpu-viewer",    "gpu-viewer",    "Vulkan / OpenGL / OpenCL info viewer"),
+        ("Radeontop",      "radeontop",     "radeontop",     "AMD GPU utilisation monitor"),
+    ]
+
+    def _detect_gpus(self) -> tuple[bool, bool, bool]:
+        try:
+            out = subprocess.run(
+                ["lspci"], capture_output=True, text=True, timeout=5
+            ).stdout.lower()
+            return "nvidia" in out, ("amd" in out or "radeon" in out), "intel" in out
+        except Exception:
+            return False, False, True  # default assume intel if unknown
+
+    def _build_gpu_page(self):
+        page = QScrollArea()
+        page.setWidgetResizable(True)
+        inner = QWidget()
+        self._gpu_layout = QVBoxLayout(inner)
+        self._gpu_layout.setContentsMargins(30, 24, 30, 24)
+        self._gpu_layout.setSpacing(0)
+        self._gpu_rows: dict[str, dict] = {}
+        page.setWidget(inner)
+        return page
+
+    def _show_gpu_drivers(self):
+        # Rebuild page content each time so install state is fresh
+        while self._gpu_layout.count():
+            item = self._gpu_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        has_nvidia, has_amd, has_intel = self._detect_gpus()
+        self._gpu_rows = {}
+
+        # Detected GPU banner
+        detected = []
+        if has_nvidia: detected.append("NVIDIA")
+        if has_amd:    detected.append("AMD")
+        if has_intel:  detected.append("Intel")
+        banner_text = f"Detected GPU{'s' if len(detected) > 1 else ''}: {', '.join(detected)}" if detected else "GPU detection unavailable"
+
+        hdr_row = QHBoxLayout()
+        hdr = QLabel("GPU Drivers & Software")
+        hdr.setStyleSheet(f"font-size: 22px; font-weight: 800; color: {TEXT};")
+        hdr_row.addWidget(hdr)
+        hdr_row.addStretch()
+        banner = QLabel(banner_text)
+        banner.setStyleSheet(
+            f"font-size: 11px; font-weight: 600; color: {GREEN};"
+            f"background: {GREEN}22; border-radius: 10px; padding: 4px 12px;"
+        )
+        hdr_row.addWidget(banner)
+        hdr_w = QWidget()
+        hdr_w.setLayout(hdr_row)
+        self._gpu_layout.addWidget(hdr_w)
+
+        sub = QLabel("Drivers marked with ★ are recommended for your detected GPU.")
+        sub.setStyleSheet(f"font-size: 12px; color: {SUBTEXT}; margin-bottom: 16px;")
+        self._gpu_layout.addWidget(sub)
+
+        # Order sections: detected GPUs first
+        sections = []
+        if has_nvidia: sections.append(("NVIDIA", self.GPU_NVIDIA, BADGE_PACMAN))
+        if has_amd:    sections.append(("AMD",    self.GPU_AMD,    BADGE_AUR))
+        if has_intel:  sections.append(("Intel",  self.GPU_INTEL,  "#00BCD4"))
+        if not has_nvidia: sections.append(("NVIDIA", self.GPU_NVIDIA, BADGE_PACMAN))
+        if not has_amd:    sections.append(("AMD",    self.GPU_AMD,    BADGE_AUR))
+        if not has_intel:  sections.append(("Intel",  self.GPU_INTEL,  "#00BCD4"))
+
+        seen_sections = set()
+        for title, pkgs, color in sections:
+            if title in seen_sections:
+                continue
+            seen_sections.add(title)
+
+            recommended = (
+                (title == "NVIDIA" and has_nvidia) or
+                (title == "AMD"    and has_amd)    or
+                (title == "Intel"  and has_intel)
+            )
+            # Section header
+            sec_w = QWidget()
+            sec_row = QHBoxLayout(sec_w)
+            sec_row.setContentsMargins(0, 20, 0, 8)
+            sec_row.setSpacing(10)
+            lbl = QLabel(("★  " if recommended else "") + title)
+            lbl.setStyleSheet(
+                f"font-size: 18px; font-weight: 800; color: {color};"
+            )
+            sec_row.addWidget(lbl)
+            sep_line = QFrame()
+            sep_line.setFrameShape(QFrame.Shape.HLine)
+            sep_line.setStyleSheet(f"color: {color}44;")
+            sec_row.addWidget(sep_line)
+            self._gpu_layout.addWidget(sec_w)
+
+            for name, pkg, desc in pkgs:
+                star = "★  " if recommended else ""
+                row = self._make_system_row(star + name, pkg, "video-display", desc, "pacman")
+                self._gpu_rows[pkg] = row
+                self._gpu_layout.addWidget(row["widget"])
+                div = QFrame()
+                div.setFrameShape(QFrame.Shape.HLine)
+                div.setStyleSheet("color: #282828;")
+                self._gpu_layout.addWidget(div)
+
+        # GPU Software section
+        sw_hdr = QWidget()
+        sw_row = QHBoxLayout(sw_hdr)
+        sw_row.setContentsMargins(0, 20, 0, 8)
+        sw_row.setSpacing(10)
+        sw_lbl = QLabel("GPU Software & Tools")
+        sw_lbl.setStyleSheet(f"font-size: 18px; font-weight: 800; color: {TEXT};")
+        sw_row.addWidget(sw_lbl)
+        sw_sep = QFrame()
+        sw_sep.setFrameShape(QFrame.Shape.HLine)
+        sw_sep.setStyleSheet("color: #38383844;")
+        sw_row.addWidget(sw_sep)
+        self._gpu_layout.addWidget(sw_hdr)
+
+        for name, pkg, icon_name, desc in self.GPU_SOFTWARE:
+            row = self._make_system_row(name, pkg, icon_name, desc, "pacman")
+            self._gpu_rows[pkg] = row
+            self._gpu_layout.addWidget(row["widget"])
+            div = QFrame()
+            div.setFrameShape(QFrame.Shape.HLine)
+            div.setStyleSheet("color: #282828;")
+            self._gpu_layout.addWidget(div)
+
+        self._gpu_layout.addStretch()
+        self._refresh_system_rows(self._gpu_rows)
+        self._stack.setCurrentIndex(8)
+
+    # ── Shared row builder for Desktops / Kernels ─────────────────────────────
+
+    def _make_system_row(self, name: str, pkg: str, icon_name: str,
+                         desc: str, source: str) -> dict:
+        w = QWidget()
+        w.setMinimumHeight(72)
+        row = QHBoxLayout(w)
+        row.setContentsMargins(0, 12, 0, 12)
+        row.setSpacing(16)
+
+        icon_lbl = QLabel()
+        icon_lbl.setFixedSize(48, 48)
+        themed = QIcon.fromTheme(icon_name)
+        if not themed.isNull():
+            icon_lbl.setPixmap(themed.pixmap(48, 48))
+        else:
+            icon_lbl.setPixmap(_fallback_icon(source, 48))
+        row.addWidget(icon_lbl)
+
+        txt = QVBoxLayout()
+        txt.setSpacing(3)
+        name_lbl = QLabel(name)
+        name_lbl.setStyleSheet(f"font-size: 15px; font-weight: 700; color: {TEXT};")
+        txt.addWidget(name_lbl)
+        desc_lbl = QLabel(desc)
+        desc_lbl.setStyleSheet(f"font-size: 12px; color: {SUBTEXT};")
+        txt.addWidget(desc_lbl)
+        row.addLayout(txt)
+        row.addStretch()
+
+        inst_badge = QLabel("Installed")
+        inst_badge.setStyleSheet(
+            f"font-size: 10px; font-weight: 600; color: {GREEN};"
+            f"background: {GREEN}22; border-radius: 8px; padding: 2px 8px;"
+        )
+        inst_badge.setVisible(False)
+        row.addWidget(inst_badge)
+
+        install_btn = QPushButton("Install")
+        install_btn.setFixedWidth(100)
+        remove_btn = QPushButton("Remove")
+        remove_btn.setObjectName("danger")
+        remove_btn.setFixedWidth(100)
+        remove_btn.setVisible(False)
+
+        install_btn.clicked.connect(lambda _, p=pkg: self._system_install(p))
+        remove_btn.clicked.connect(lambda _, p=pkg: self._system_remove(p))
+        row.addWidget(install_btn)
+        row.addWidget(remove_btn)
+
+        return {
+            "widget": w,
+            "pkg": pkg,
+            "source": source,
+            "icon_lbl": icon_lbl,
+            "inst_badge": inst_badge,
+            "install_btn": install_btn,
+            "remove_btn": remove_btn,
+        }
+
+    def _refresh_system_rows(self, rows: dict):
+        if "pacman" not in self._backends:
+            return
+        localdb = self._backends["pacman"]._localdb
+        for pkg, row in rows.items():
+            installed = localdb.get_pkg(pkg) is not None
+            row["inst_badge"].setVisible(installed)
+            row["install_btn"].setVisible(not installed)
+            row["remove_btn"].setVisible(installed)
+
+    def _system_install(self, pkg: str):
+        self._run_terminal_cmd(
+            f"Installing {pkg}",
+            ["pkexec", "pacman", "-S", "--noconfirm", "--needed", pkg]
+        )
+
+    def _system_remove(self, pkg: str):
+        reply = QMessageBox.question(
+            self, "Remove", f"Remove {pkg}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self._run_terminal_cmd(
+                f"Removing {pkg}",
+                ["pkexec", "pacman", "-R", "--noconfirm", pkg]
+            )
+
+    # ── Snapshots ─────────────────────────────────────────────────────────────
+
+    def _build_snapshots_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(30, 24, 30, 24)
+        layout.setSpacing(12)
+
+        top_row = QHBoxLayout()
+        hdr = QLabel("BTRFS Snapshots")
+        hdr.setStyleSheet(f"font-size: 22px; font-weight: 800; color: {TEXT};")
+        top_row.addWidget(hdr)
+        top_row.addStretch()
+        refresh_btn = QPushButton("🔄  Refresh")
+        refresh_btn.setObjectName("secondary")
+        refresh_btn.setFixedWidth(110)
+        refresh_btn.clicked.connect(self._show_snapshots)
+        top_row.addWidget(refresh_btn)
+        create_btn = QPushButton("📸  Create Snapshot")
+        create_btn.setFixedWidth(160)
+        create_btn.clicked.connect(self._snapshot_create)
+        top_row.addWidget(create_btn)
+        layout.addLayout(top_row)
+
+        sub = QLabel("Managed by Snapper — requires BTRFS root partition.")
+        sub.setStyleSheet(f"font-size: 12px; color: {SUBTEXT};")
+        layout.addWidget(sub)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        self._snapshots_inner = QWidget()
+        self._snapshots_layout = QVBoxLayout(self._snapshots_inner)
+        self._snapshots_layout.setContentsMargins(0, 0, 0, 0)
+        self._snapshots_layout.setSpacing(0)
+        self._snapshots_layout.addStretch()
+        scroll.setWidget(self._snapshots_inner)
+        layout.addWidget(scroll)
+
+        return page
+
+    def _show_snapshots(self):
+        self._stack.setCurrentIndex(5)
+
+        # Clear existing rows
+        while self._snapshots_layout.count() > 1:
+            item = self._snapshots_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        try:
+            # Check root filesystem is btrfs first
+            fs_result = subprocess.run(
+                ["findmnt", "-n", "-o", "FSTYPE", "/"],
+                capture_output=True, text=True, timeout=5
+            )
+            root_fs = fs_result.stdout.strip()
+            if root_fs != "btrfs":
+                raise RuntimeError(
+                    f"Root filesystem is {root_fs or 'unknown'}, not BTRFS.\n\n"
+                    "Snapper snapshots require the root partition to be formatted as BTRFS.\n\n"
+                    "This feature will work on an installed Velox system with BTRFS selected during installation."
+                )
+
+            if not shutil.which("snapper"):
+                raise RuntimeError(
+                    "snapper is not installed.\n\n"
+                    "Install it with:  sudo pacman -S snapper"
+                )
+            result = subprocess.run(
+                ["snapper", "list"],
+                capture_output=True, text=True, timeout=10
+            )
+            if result.returncode != 0:
+                stderr = result.stderr.strip()
+                if "does not exist" in stderr or "not configured" in stderr.lower():
+                    self._show_snapper_setup_prompt()
+                    return
+                raise RuntimeError(stderr or "snapper returned an error.")
+            lines = result.stdout.strip().splitlines()
+            if len(lines) <= 2:
+                raise RuntimeError("No snapshots found")
+            for line in lines[2:]:
+                parts = [p.strip() for p in line.split("|")]
+                if len(parts) < 5:
+                    continue
+                num, snap_type, user, date, desc = parts[0], parts[1], parts[2], parts[3], parts[4] if len(parts) > 4 else ""
+                row_w = QWidget()
+                row_w.setMinimumHeight(52)
+                row = QHBoxLayout(row_w)
+                row.setContentsMargins(0, 8, 0, 8)
+                row.setSpacing(16)
+                num_lbl = QLabel(f"#{num}")
+                num_lbl.setFixedWidth(36)
+                num_lbl.setStyleSheet(f"font-size: 13px; font-weight: 700; color: {GREEN};")
+                row.addWidget(num_lbl)
+                type_lbl = QLabel(snap_type)
+                type_lbl.setFixedWidth(70)
+                type_lbl.setStyleSheet(f"font-size: 11px; color: {SUBTEXT};")
+                row.addWidget(type_lbl)
+                date_lbl = QLabel(date)
+                date_lbl.setFixedWidth(160)
+                date_lbl.setStyleSheet(f"font-size: 12px; color: {TEXT};")
+                row.addWidget(date_lbl)
+                desc_lbl = QLabel(desc or "—")
+                desc_lbl.setStyleSheet(f"font-size: 12px; color: {SUBTEXT};")
+                row.addWidget(desc_lbl)
+                row.addStretch()
+                del_btn = QPushButton("Delete")
+                del_btn.setObjectName("danger")
+                del_btn.setFixedWidth(80)
+                del_btn.clicked.connect(lambda _, n=num: self._snapshot_delete(n))
+                row.addWidget(del_btn)
+                self._snapshots_layout.insertWidget(
+                    self._snapshots_layout.count() - 1, row_w
+                )
+                sep = QFrame()
+                sep.setFrameShape(QFrame.Shape.HLine)
+                sep.setStyleSheet("color: #282828;")
+                self._snapshots_layout.insertWidget(
+                    self._snapshots_layout.count() - 1, sep
+                )
+        except Exception as e:
+            msg = QLabel(f"⚠  {e}")
+            msg.setStyleSheet(f"font-size: 14px; color: {SUBTEXT}; padding: 20px;")
+            msg.setWordWrap(True)
+            self._snapshots_layout.insertWidget(0, msg)
+
+    def _show_snapper_setup_prompt(self):
+        w = QWidget()
+        vbox = QVBoxLayout(w)
+        vbox.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        vbox.setContentsMargins(0, 60, 0, 0)
+        vbox.setSpacing(16)
+
+        icon = QLabel("📸")
+        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon.setStyleSheet("font-size: 56px;")
+        vbox.addWidget(icon)
+
+        title = QLabel("Snapper is not configured")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet(f"font-size: 20px; font-weight: 800; color: {TEXT};")
+        vbox.addWidget(title)
+
+        sub = QLabel(
+            "No snapshot config found for the root partition.\n"
+            "Click below to set up snapper automatically."
+        )
+        sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sub.setStyleSheet(f"font-size: 13px; color: {SUBTEXT};")
+        sub.setWordWrap(True)
+        vbox.addWidget(sub)
+
+        setup_btn = QPushButton("⚙️  Set Up Snapper Now")
+        setup_btn.setFixedWidth(220)
+        setup_btn.clicked.connect(self._run_snapper_setup)
+        vbox.addWidget(setup_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        self._snapshots_layout.insertWidget(0, w)
+
+    def _run_snapper_setup(self):
+        self._run_terminal_cmd(
+            "Setting Up Snapper",
+            ["pkexec", "bash", "-c",
+             "snapper -c root create-config / && "
+             "systemctl enable --now snapper-timeline.timer snapper-cleanup.timer"]
+        )
+
+    def _snapshot_create(self):
+        if not shutil.which("snapper"):
+            QMessageBox.warning(self, "Not Available",
+                "snapper is not installed on this system.\n"
+                "Snapshots require BTRFS root and snapper installed.")
+            return
+        self._run_terminal_cmd(
+            "Creating Snapshot",
+            ["pkexec", "snapper", "create", "--description", "Manual snapshot"]
+        )
+
+    def _snapshot_delete(self, num: str):
+        reply = QMessageBox.question(
+            self, "Delete Snapshot", f"Delete snapshot #{num}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self._run_terminal_cmd(
+                f"Deleting Snapshot #{num}",
+                ["pkexec", "snapper", "delete", num]
+            )
+
+    # ── Terminal output page ──────────────────────────────────────────────────
+
+    def _build_terminal_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(30, 24, 30, 24)
+        layout.setSpacing(12)
+
+        top = QHBoxLayout()
+        self._terminal_title = QLabel("Running…")
+        self._terminal_title.setStyleSheet(
+            f"font-size: 22px; font-weight: 800; color: {TEXT};"
+        )
+        top.addWidget(self._terminal_title)
+        top.addStretch()
+        close_btn = QPushButton("✕  Close")
+        close_btn.setObjectName("secondary")
+        close_btn.setFixedWidth(110)
+        close_btn.clicked.connect(self._show_home)
+        top.addWidget(close_btn)
+        layout.addLayout(top)
+
+        self._terminal_output = QTextEdit()
+        self._terminal_output.setReadOnly(True)
+        self._terminal_output.setFont(QFont("Monospace", 11))
+        self._terminal_output.setStyleSheet(
+            "background: #111; border-radius: 10px; color: #c8ffc8;"
+            "border: 1px solid #2a2a2a; padding: 10px;"
+        )
+        layout.addWidget(self._terminal_output)
+
+        self._terminal_status = QLabel("")
+        self._terminal_status.setStyleSheet(f"font-size: 12px; color: {SUBTEXT};")
+        layout.addWidget(self._terminal_status)
+        return page
+
+    def _run_terminal_cmd(self, title: str, cmd: list):
+        self._terminal_title.setText(title)
+        self._terminal_output.clear()
+        self._terminal_status.setText("Running…")
+        self._stack.setCurrentIndex(6)
+
+        self._term_worker = TerminalWorker(cmd)
+        self._term_worker.line_ready.connect(
+            lambda line: self._terminal_output.append(line)
+        )
+        self._term_worker.finished_ok.connect(self._on_terminal_done)
+        self._term_worker.start()
+
+    def _on_terminal_done(self, ok: bool):
+        if ok:
+            self._terminal_status.setText("✅  Done")
+        else:
+            self._terminal_status.setText("❌  Command finished with errors")
+        if "pacman" in self._backends:
+            self._backends["pacman"].refresh()
+
+    # ── TOOLS actions ─────────────────────────────────────────────────────────
+
+    def _run_fix_keyrings(self):
+        script = (
+            "pacman-key --init && "
+            "pacman-key --populate archlinux && "
+            "pacman -Sy --noconfirm archlinux-keyring"
+        )
+        self._run_terminal_cmd(
+            "Fix Keyrings",
+            ["pkexec", "bash", "-c", script]
+        )
+
+    def _toggle_source(self, source: str, enabled: bool):
+        if enabled:
+            self._active_sources.add(source)
+        else:
+            self._active_sources.discard(source)
+
+    # ── Search ────────────────────────────────────────────────────────────────
+
+    def _do_search(self):
+        query = self._search_edit.text().strip()
+        if not query:
+            return
+        if self._search_worker and self._search_worker.isRunning():
+            self._search_worker.quit()
+
+        self._results_header.setText(f'Results for "{query}"')
+        self._status_label.setText("Searching…")
+        self._current_results = []
+        self._show_results([])
+        self._stack.setCurrentIndex(1)
+
+        self._search_worker = SearchWorker(query, self._backends, self._active_sources)
+        self._search_worker.result.connect(self._on_search_results)
+        self._search_worker.error.connect(lambda e: self._status_label.setText(f"Error: {e}"))
+        self._search_worker.start()
+
+    def _on_search_results(self, packages):
+        self._current_results = packages
+        self._show_results(packages)
+
+    # ── Installed / Updates ───────────────────────────────────────────────────
+
+    def _show_installed(self):
+        self._results_header.setText("Installed Packages")
+        self._status_label.setText("Loading…")
+        installed = []
+        if "pacman" in self._backends:
+            localdb = self._backends["pacman"]._localdb
+            for pkg in localdb.pkgcache:
+                installed.append(Package(
+                    name=pkg.name, version=pkg.version,
+                    description=pkg.desc or "", source="pacman",
+                    installed=True, icon_name=pkg.name,
+                ))
+        if "flatpak" in self._backends:
+            try:
+                for ref in self._backends["flatpak"]._inst.list_installed_refs():
+                    installed.append(Package(
+                        name=ref.get_appdata_name() or ref.get_name(),
+                        version=ref.get_appdata_version() or "",
+                        description="",
+                        source="flatpak",
+                        installed=True,
+                        icon_name=ref.get_name().split(".")[-1].lower(),
+                        flatpak_ref=ref.get_name(),
+                    ))
+            except Exception:
+                pass
+        self._current_results = installed
+        self._show_results(installed)
+
+    # ── Updates page ──────────────────────────────────────────────────────────
+
+    def _build_updates_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(30, 24, 30, 16)
+        layout.setSpacing(12)
+
+        top = QHBoxLayout()
+        hdr = QLabel("Updates")
+        hdr.setStyleSheet(f"font-size: 22px; font-weight: 800; color: {TEXT};")
+        top.addWidget(hdr)
+        top.addStretch()
+        self._upd_status = QLabel("")
+        self._upd_status.setStyleSheet(f"font-size: 12px; color: {SUBTEXT};")
+        top.addWidget(self._upd_status)
+        refresh_btn = QPushButton("🔄  Refresh")
+        refresh_btn.setObjectName("secondary")
+        refresh_btn.setFixedWidth(110)
+        refresh_btn.clicked.connect(self._show_updates)
+        top.addWidget(refresh_btn)
+        self._upd_all_btn = QPushButton("⬆️  Update All")
+        self._upd_all_btn.setFixedWidth(130)
+        self._upd_all_btn.setEnabled(False)
+        self._upd_all_btn.clicked.connect(self._run_update_all)
+        top.addWidget(self._upd_all_btn)
+        layout.addLayout(top)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        self._upd_inner = QWidget()
+        self._upd_layout = QVBoxLayout(self._upd_inner)
+        self._upd_layout.setContentsMargins(0, 0, 0, 0)
+        self._upd_layout.setSpacing(0)
+        self._upd_layout.addStretch()
+        scroll.setWidget(self._upd_inner)
+        layout.addWidget(scroll)
+        return page
+
+    def _show_updates(self):
+        # Show page immediately with loading state
+        self._stack.setCurrentIndex(7)
+        self._upd_status.setText("Checking for updates…")
+        self._upd_all_btn.setEnabled(False)
+
+        while self._upd_layout.count() > 1:
+            item = self._upd_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        loading = QLabel("Checking for updates…")
+        loading.setStyleSheet(f"font-size: 14px; color: {SUBTEXT}; padding: 40px;")
+        loading.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._upd_layout.insertWidget(0, loading)
+
+        self._update_worker = UpdateCheckWorker(self._backends.get("flatpak"))
+        self._update_worker.done.connect(self._on_updates_done)
+        self._update_worker.start()
+
+    def _on_updates_done(self, pacman_updates: list, flatpak_updates: list):
+        while self._upd_layout.count() > 1:
+            item = self._upd_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        total = len(pacman_updates) + len(flatpak_updates)
+
+        if total == 0:
+            self._upd_status.setText("All up to date")
+            self._upd_all_btn.setEnabled(False)
+            empty = QWidget()
+            vbox = QVBoxLayout(empty)
+            vbox.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            vbox.setContentsMargins(0, 80, 0, 0)
+            vbox.setSpacing(14)
+            ok = QLabel("✅")
+            ok.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            ok.setStyleSheet("font-size: 56px;")
+            vbox.addWidget(ok)
+            t = QLabel("Everything is up to date!")
+            t.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            t.setStyleSheet(f"font-size: 22px; font-weight: bold; color: {TEXT};")
+            vbox.addWidget(t)
+            s = QLabel("All packages are at their latest versions.")
+            s.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            s.setStyleSheet(f"font-size: 14px; color: {SUBTEXT};")
+            vbox.addWidget(s)
+            self._upd_layout.insertWidget(0, empty)
+            return
+
+        self._upd_status.setText(f"{total} update{'s' if total != 1 else ''} available")
+        self._upd_all_btn.setEnabled(True)
+        idx = 0
+
+        def insert(w):
+            nonlocal idx
+            self._upd_layout.insertWidget(idx, w)
+            idx += 1
+
+        if pacman_updates:
+            insert(self._make_source_header("pacman"))
+            for name, old_ver, new_ver in pacman_updates:
+                insert(self._make_update_row(name, old_ver, new_ver, "pacman"))
+                sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
+                sep.setStyleSheet("color: #282828;"); insert(sep)
+
+        if flatpak_updates:
+            insert(self._make_source_header("flatpak"))
+            for name, old_ver, new_ver in flatpak_updates:
+                insert(self._make_update_row(name, old_ver, new_ver, "flatpak"))
+                sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
+                sep.setStyleSheet("color: #282828;"); insert(sep)
+
+    def _make_update_row(self, name: str, old_ver: str, new_ver: str, source: str) -> QWidget:
+        w = QWidget()
+        w.setMinimumHeight(52)
+        row = QHBoxLayout(w)
+        row.setContentsMargins(4, 8, 4, 8)
+        row.setSpacing(14)
+
+        badge = QLabel(source.upper())
+        badge.setStyleSheet(BADGE_STYLES.get(source, ""))
+        badge.setFixedWidth(68)
+        row.addWidget(badge)
+
+        name_lbl = QLabel(name)
+        name_lbl.setStyleSheet(f"font-size: 13px; font-weight: 600; color: {TEXT};")
+        row.addWidget(name_lbl)
+        row.addStretch()
+
+        if old_ver or new_ver:
+            ver_lbl = QLabel(f"{old_ver}  →  {new_ver}" if new_ver else old_ver)
+            ver_lbl.setStyleSheet(f"font-size: 12px; color: {SUBTEXT};")
+            row.addWidget(ver_lbl)
+        return w
+
+    def _run_update_all(self):
+        cmd = "pkexec pacman -Syu --noconfirm"
+        if shutil.which("flatpak"):
+            cmd += " && flatpak update -y"
+        self._run_terminal_cmd("Update All", ["bash", "-c", cmd])
+
+    # ── Install / Remove ──────────────────────────────────────────────────────
+
+    def _on_install(self, pkg: Package):
+        if pkg.source == "aur":
+            self._run_pkgcheck_then_install(pkg)
+        else:
+            self._run_install(pkg)
+
+    def _run_pkgcheck_then_install(self, pkg: Package):
+        self._detail_view.set_buttons_enabled(False)
+        self._progress = QProgressDialog(
+            f"Running velox-pkgcheck on {pkg.name}…", None, 0, 0, self
+        )
+        self._progress.setWindowTitle("Security Check")
+        self._progress.setModal(True)
+        self._progress.show()
+
+        self._pkgcheck_worker = PkgCheckWorker(self._backends["aur"], pkg.name)
+        self._pkgcheck_worker.done.connect(lambda code, out: self._on_pkgcheck_done(code, out, pkg))
+        self._pkgcheck_worker.start()
+
+    def _on_pkgcheck_done(self, code: int, output: str, pkg: Package):
+        self._progress.close()
+        self._detail_view.set_buttons_enabled(True)
+
+        if code == AURBackend.TIMEOUT:
+            # Network/timeout — not a security finding, let user decide
+            dlg = QMessageBox(self)
+            dlg.setWindowTitle("Security Check Unavailable")
+            dlg.setIcon(QMessageBox.Icon.Warning)
+            dlg.setText(
+                f"Could not complete the security scan for <b>{pkg.name}</b> "
+                "(network timeout).<br><br>"
+                "This does <b>not</b> mean the package is unsafe — the scan simply "
+                "couldn't reach the server in time."
+            )
+            dlg.setDetailedText(output)
+            install_btn = dlg.addButton("Install Anyway", QMessageBox.ButtonRole.AcceptRole)
+            dlg.addButton("Retry", QMessageBox.ButtonRole.ResetRole)
+            dlg.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+            dlg.exec()
+            clicked = dlg.clickedButton()
+            if clicked == install_btn:
+                self._run_install(pkg)
+            elif clicked.text() == "Retry":
+                self._run_pkgcheck_then_install(pkg)
+        elif code == 0:
+            self._run_install(pkg)
+        elif code in (1, 2):
+            dlg = _PkgCheckDialog(pkg.name, code, output, allow_proceed=True, parent=self)
+            if dlg.exec() == QDialog.DialogCode.Accepted:
+                self._run_install(pkg)
+        elif code >= 3:
+            dlg = _PkgCheckDialog(pkg.name, code, output, allow_proceed=(code == 3), parent=self)
+            if dlg.exec() == QDialog.DialogCode.Accepted:
+                self._run_install(pkg)
+
+    def _run_install(self, pkg: Package):
+        self._detail_view.set_buttons_enabled(False)
+        self._progress = QProgressDialog(
+            f"Installing {pkg.name}…", None, 0, 0, self
+        )
+        self._progress.setWindowTitle("Installing")
+        self._progress.setModal(True)
+        self._progress.show()
+
+        self._install_worker = InstallWorker(pkg, self._backends)
+        self._install_worker.done.connect(lambda ok, out: self._on_install_done(ok, out, pkg))
+        self._install_worker.start()
+
+    def _on_install_done(self, ok: bool, output: str, pkg: Package):
+        self._progress.close()
+        if "pacman" in self._backends:
+            self._backends["pacman"].refresh()
+        pkg.installed = ok
+        self._detail_view.show_package(pkg)
+        self._detail_view.set_buttons_enabled(True)
+        if ok:
+            QMessageBox.information(self, "Installed", f"{pkg.name} installed successfully.")
+        else:
+            dlg = QMessageBox(self)
+            dlg.setWindowTitle("Install Failed")
+            dlg.setText(f"Failed to install {pkg.name}.")
+            dlg.setDetailedText(output)
+            dlg.exec()
+
+    def _on_remove(self, pkg: Package):
+        reply = QMessageBox.question(
+            self, "Remove Package",
+            f"Remove {pkg.name}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        self._detail_view.set_buttons_enabled(False)
+        self._progress = QProgressDialog(f"Removing {pkg.name}…", None, 0, 0, self)
+        self._progress.setWindowTitle("Removing")
+        self._progress.setModal(True)
+        self._progress.show()
+
+        self._remove_worker = RemoveWorker(pkg, self._backends)
+        self._remove_worker.done.connect(lambda ok, out: self._on_remove_done(ok, out, pkg))
+        self._remove_worker.start()
+
+    def _on_remove_done(self, ok: bool, output: str, pkg: Package):
+        self._progress.close()
+        if "pacman" in self._backends:
+            self._backends["pacman"].refresh()
+        pkg.installed = not ok
+        self._detail_view.show_package(pkg)
+        self._detail_view.set_buttons_enabled(True)
+        if ok:
+            QMessageBox.information(self, "Removed", f"{pkg.name} removed.")
+        else:
+            dlg = QMessageBox(self)
+            dlg.setWindowTitle("Remove Failed")
+            dlg.setText(f"Failed to remove {pkg.name}.")
+            dlg.setDetailedText(output)
+            dlg.exec()
+
+
+# ── velox-pkgcheck result dialog ──────────────────────────────────────────────
+
+class _PkgCheckDialog(QDialog):
+    SEVERITY = {0: ("Clean", GREEN), 1: ("Info", "#2196F3"),
+                2: ("Warning", "#FF9800"), 3: ("High Risk", "#FF5722"),
+                4: ("CRITICAL — BLOCKED", "#c0392b")}
+
+    def __init__(self, pkg_name, code, output, allow_proceed, parent=None):
+        super().__init__(parent)
+        sev_label, sev_color = self.SEVERITY.get(code, ("Unknown", SUBTEXT))
+        self.setWindowTitle("Security Scan Result")
+        self.setMinimumSize(580, 420)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        header = QLabel(f"velox-pkgcheck: {pkg_name}")
+        header.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {TEXT};")
+        layout.addWidget(header)
+
+        sev = QLabel(f"Severity: {sev_label}")
+        sev.setStyleSheet(f"font-size: 14px; font-weight: bold; color: {sev_color};")
+        layout.addWidget(sev)
+
+        out_box = QTextEdit()
+        out_box.setReadOnly(True)
+        out_box.setPlainText(output or "(no output)")
+        out_box.setFixedHeight(220)
+        layout.addWidget(out_box)
+
+        if code == 4:
+            warn = QLabel("⛔ Installation blocked due to critical security findings.")
+            warn.setStyleSheet(f"color: #c0392b; font-weight: bold;")
+            warn.setWordWrap(True)
+            layout.addWidget(warn)
+            buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+            buttons.rejected.connect(self.reject)
+        elif allow_proceed:
+            warn_text = {
+                1: "This package has informational findings. You may proceed.",
+                2: "This package has medium-risk findings. Proceed with caution.",
+                3: "⚠ HIGH RISK findings detected. Only proceed if you trust this package.",
+            }.get(code, "")
+            warn = QLabel(warn_text)
+            warn.setStyleSheet(f"color: {sev_color}; font-weight: bold;")
+            warn.setWordWrap(True)
+            layout.addWidget(warn)
+            buttons = QDialogButtonBox(
+                QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+            )
+            buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Install Anyway")
+            buttons.accepted.connect(self.accept)
+            buttons.rejected.connect(self.reject)
+        else:
+            buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+            buttons.rejected.connect(self.reject)
+
+        layout.addWidget(buttons)
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+def main():
+    app = QApplication(sys.argv)
+    app.setApplicationName("Velox Control Center")
+    app.setOrganizationName("Velox Linux")
+    window = VeloxStore()
+    window.show()
+    sys.exit(app.exec())
+
+if __name__ == "__main__":
+    main()

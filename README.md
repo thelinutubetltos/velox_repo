@@ -31,7 +31,7 @@ From that point on, `paru` and `yay` automatically scan PKGBUILDs before install
 
 | Repo | Hosts | Packages |
 |---|---|---|
-| `velox_repo` | GitHub Pages | `velox-pkgcheck`, `velox-welcome`, `velox-wallpapers` |
+| `velox_repo` | GitHub Pages | `velox-pkgcheck`, `velox-welcome`, `velox-wallpapers`, `velox-control-center` |
 | `velox-packages` | GitHub Releases | `linux-velox`, `linux-velox-headers`, `calamares` |
 
 ---
@@ -42,9 +42,10 @@ From that point on, `paru` and `yay` automatically scan PKGBUILDs before install
 
 | Package | Description | Status |
 |---|---|---|
-| `velox-wallpapers` | Official Velox Linux wallpaper pack (Velox-1 through Velox-7) | Available |
-| `velox-welcome` | Velox welcome app — first-boot setup, app installer, kernel manager | Available |
+| `velox-wallpapers` | Official Velox Linux wallpaper pack (Velox-1 through Velox-15) | Available |
+| `velox-welcome` | Velox welcome app — first-boot setup and quick-start guide | Available |
 | `velox-pkgcheck` | PKGBUILD supply-chain attack scanner + `aur-install` wrapper | Available |
+| `velox-control-center` | All-in-one control center — software, GPU drivers, kernels, desktops, snapshots, updates | Available |
 
 ### velox-packages (GitHub Releases)
 
@@ -79,6 +80,32 @@ The Velox welcome app launches on first boot and includes:
 ```bash
 sudo pacman -S velox-welcome
 ```
+
+---
+
+## velox-control-center
+
+The Velox Control Center is the one-stop system management app for Velox Linux. Built with PyQt6.
+
+```bash
+sudo pacman -S velox-control-center
+```
+
+### Features
+
+| Section | What it does |
+|---|---|
+| **Home** | Categorised quick-launch tiles — Browsers, Office, Gaming, Creative, Development, Media, System |
+| **Installed** | Browse and remove all installed pacman and Flatpak packages |
+| **Updates** | Lists pending pacman + Flatpak updates with one-click **Update All** |
+| **Desktops** | Install KDE Plasma, GNOME, XFCE, Cinnamon, MATE, LXQt, Hyprland, i3, Sway |
+| **Kernels** | Manage linux-velox, linux, linux-lts, linux-zen, linux-hardened, linux-rt |
+| **GPU Drivers** | Auto-detects your GPU and surfaces recommended NVIDIA / AMD / Intel drivers + tools (MangoHud, CoreCtrl, nvtop, GreenWithEnvy) |
+| **Snapshots** | View, create and delete BTRFS snapshots via Snapper (BTRFS root required) |
+| **Fix Keyrings** | One-click `pacman-key --init && --populate` keyring repair |
+| **Search** | Search pacman, Chaotic-AUR, AUR and Flatpak simultaneously with source badges |
+
+All AUR installs are scanned by **velox-pkgcheck** before proceeding.
 
 ---
 
