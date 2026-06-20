@@ -1746,10 +1746,52 @@ class VeloxStore(QMainWindow):
             row["install_btn"].setVisible(not installed)
             row["remove_btn"].setVisible(installed)
 
+    def _pacman_db_age_hours(self) -> float:
+        files = glob.glob("/var/lib/pacman/sync/core.db")
+        if not files:
+            return 999.0
+        return (time.time() - os.path.getmtime(files[0])) / 3600
+
+    def _stale_db_guard(self, pkg_name: str,
+                        on_update_and_install,
+                        on_install_anyway) -> None:
+        age_h = self._pacman_db_age_hours()
+        if age_h < 1.0:
+            on_install_anyway()
+            return
+
+        hours = int(age_h)
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Package Database is Stale")
+        msg.setIcon(QMessageBox.Icon.Warning)
+        msg.setText(
+            f"Your package database hasn't been synced in "
+            f"<b>{hours} hour{'s' if hours != 1 else ''}</b>.<br><br>"
+            "Installing packages without first updating can cause dependency "
+            "conflicts — this is one of the most common ways Arch Linux systems "
+            "break. It is strongly recommended to run a full system update first."
+        )
+        update_btn  = msg.addButton("Update System & Install", QMessageBox.ButtonRole.AcceptRole)
+        anyway_btn  = msg.addButton("Install Anyway",          QMessageBox.ButtonRole.DestructiveRole)
+        msg.addButton("Cancel",                                 QMessageBox.ButtonRole.RejectRole)
+        msg.exec()
+        clicked = msg.clickedButton()
+        if clicked == update_btn:
+            on_update_and_install()
+        elif clicked == anyway_btn:
+            on_install_anyway()
+
     def _system_install(self, pkg: str):
-        self._run_terminal_cmd(
-            f"Installing {pkg}",
-            ["pkexec", "pacman", "-S", "--noconfirm", "--needed", pkg]
+        self._stale_db_guard(
+            pkg,
+            on_update_and_install=lambda: self._run_terminal_cmd(
+                f"Update System & Install {pkg}",
+                ["pkexec", "pacman", "-Syu", "--noconfirm", "--needed", pkg]
+            ),
+            on_install_anyway=lambda: self._run_terminal_cmd(
+                f"Installing {pkg}",
+                ["pkexec", "pacman", "-S", "--noconfirm", "--needed", pkg]
+            ),
         )
 
     def _system_remove(self, pkg: str):
@@ -2391,6 +2433,15 @@ class VeloxStore(QMainWindow):
     def _on_install(self, pkg: Package):
         if pkg.source == "aur":
             self._run_pkgcheck_then_install(pkg)
+        elif pkg.source == "pacman":
+            self._stale_db_guard(
+                pkg.name,
+                on_update_and_install=lambda: self._run_terminal_cmd(
+                    f"Update System & Install {pkg.name}",
+                    ["pkexec", "pacman", "-Syu", "--noconfirm", "--needed", pkg.name]
+                ),
+                on_install_anyway=lambda: self._run_install(pkg),
+            )
         else:
             self._run_install(pkg)
 
