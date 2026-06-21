@@ -1,0 +1,8 @@
+{
+    "KPlugin": {
+        "Authors": [{"Name": "Velox Linux"}],
+        "Id": "Velox-12",
+        "License": "CC-BY-SA-4.0",
+        "Name": "Velox 12"
+    }
+}

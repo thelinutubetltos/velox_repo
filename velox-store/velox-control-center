@@ -1406,22 +1406,10 @@ class VeloxStore(QMainWindow):
     DESKTOPS = [
         ("KDE Plasma",  "plasma-desktop",  "plasma-desktop",
          "Full KDE Plasma desktop — the Velox default"),
-        ("GNOME",       "gnome",           "gnome-shell",
-         "Modern, polished GNOME desktop environment"),
-        ("XFCE",        "xfce4",           "xfce4-session",
-         "Lightweight and fast XFCE desktop"),
-        ("Cinnamon",    "cinnamon",        "cinnamon",
-         "Traditional Linux Mint-style desktop"),
-        ("MATE",        "mate",            "mate-session-manager",
-         "Classic GNOME 2 continuation"),
-        ("LXQt",        "lxqt",            "lxqt-session",
-         "Lightweight Qt-based desktop environment"),
-        ("Hyprland",    "hyprland",        "hyprland",
-         "Modern Wayland tiling compositor"),
-        ("i3",          "i3-wm",           "i3",
-         "Minimalist X11 tiling window manager"),
-        ("Sway",        "sway",            "sway",
-         "Wayland i3-compatible tiling compositor"),
+        ("Velimmon",    "velimmon",        "cinnamon",
+         "Velox Cinnamon — traditional desktop with Velox dark theme and Arc-Dark styling"),
+        ("Velfce",      "velfce",          "xfce4-session",
+         "Velox XFCE — lightweight desktop with Velox dark theme and Arc-Dark styling"),
     ]
 
     def _build_desktops_page(self):
@@ -1435,7 +1423,7 @@ class VeloxStore(QMainWindow):
         hdr = QLabel("Desktop Environments")
         hdr.setStyleSheet(f"font-size: 22px; font-weight: 800; color: {TEXT}; margin-bottom: 6px;")
         layout.addWidget(hdr)
-        sub = QLabel("Install additional desktop environments alongside your current one.")
+        sub = QLabel("Velox-supported desktop environments — themed, tested, and ready to use.")
         sub.setStyleSheet(f"font-size: 12px; color: {SUBTEXT}; margin-bottom: 20px;")
         layout.addWidget(sub)
 

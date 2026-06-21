@@ -1,0 +1,41 @@
+pkgname=velimmon
+pkgver=1.0
+pkgrel=1
+pkgdesc="Velox Cinnamon — Cinnamon desktop environment with Velox theming"
+arch=('any')
+url="https://github.com/thelinutubetltos/velox-iso"
+license=('custom')
+depends=(
+    'cinnamon'
+    'cinnamon-translations'
+    'nemo'
+    'nemo-fileroller'
+    'gnome-terminal'
+    'gnome-calculator'
+    'eog'
+    'totem'
+    'arc-gtk-theme'
+    'papirus-icon-theme'
+    'noto-fonts'
+    'breeze'
+)
+source=()
+
+package() {
+    local src="$startdir"
+
+    # GTK 3 theme defaults
+    install -Dm644 "$src/skel/.config/gtk-3.0/settings.ini" \
+        "$pkgdir/etc/skel/.config/gtk-3.0/settings.ini"
+
+    # GTK 4 theme defaults
+    install -Dm644 "$src/skel/.config/gtk-4.0/settings.ini" \
+        "$pkgdir/etc/skel/.config/gtk-4.0/settings.ini"
+
+    # Cinnamon dconf system defaults
+    install -Dm644 "$src/dconf/00-velimmon" \
+        "$pkgdir/etc/dconf/db/local.d/00-velimmon"
+
+    install -Dm644 "$src/dconf/00-velimmon-locks" \
+        "$pkgdir/etc/dconf/db/local.d/locks/00-velimmon"
+}

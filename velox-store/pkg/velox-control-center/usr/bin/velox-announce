@@ -1,0 +1,17 @@
+#!/bin/bash
+# Wait for velox-set-resolution to finish before showing announcement
+for i in $(seq 1 60); do
+    pgrep -f "velox-set-resolution" > /dev/null || break
+    sleep 1
+done
+sleep 2
+
+kdialog \
+    --title "Welcome to Velox Linux" \
+    --yesno "$(printf 'Welcome to Velox Linux!\n\nThe Velox Control Center is your one-stop shop for everything:\n\n  •  Install apps — pacman, AUR, Chaotic-AUR & Flatpak\n  •  GPU drivers — NVIDIA, AMD and Intel\n  •  Switch desktop environments or kernels\n  •  Manage BTRFS snapshots with Snapper\n  •  One-click system updates\n  •  Fix broken keyrings\n\nWould you like to open it now?')" \
+    --yes-label "Open Control Center" \
+    --no-label "Maybe Later"
+
+[ $? -eq 0 ] && velox-control-center &
+
+rm -f "$HOME/.config/autostart/velox-announce.desktop"

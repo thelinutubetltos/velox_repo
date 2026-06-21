@@ -9,6 +9,11 @@ import tempfile
 import shutil
 import urllib.request
 import urllib.parse
+import xml.etree.ElementTree as ET
+import email.utils
+import glob
+import time
+from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -486,6 +491,70 @@ class TerminalWorker(QThread):
             self.line_ready.emit(f"Error: {e}")
             self.finished_ok.emit(False)
 
+class KeyringAutoRefreshWorker(QThread):
+    status = pyqtSignal(str)   # status message for UI
+    done   = pyqtSignal(bool)  # True = refreshed OK, False = skipped/failed
+
+    _STALE_DAYS = 7
+
+    def run(self):
+        try:
+            # Check age of installed archlinux-keyring without root
+            files = glob.glob("/var/lib/pacman/local/archlinux-keyring-*/desc")
+            if not files:
+                self.done.emit(False)
+                return
+            age_days = (time.time() - os.path.getmtime(files[0])) / 86400
+            if age_days < self._STALE_DAYS:
+                self.done.emit(False)
+                return
+
+            # Keyring is stale — refresh silently
+            self.status.emit(f"🔑  Refreshing keyring ({int(age_days)}d old)…")
+            result = subprocess.run(
+                ["pkexec", "pacman", "-Sy", "--noconfirm", "archlinux-keyring"],
+                capture_output=True, text=True, timeout=120
+            )
+            self.done.emit(result.returncode == 0)
+        except Exception:
+            self.done.emit(False)
+
+
+class ArchNewsWorker(QThread):
+    done = pyqtSignal(list)   # list of (title, link, date_str, is_recent)
+
+    _URL = "https://archlinux.org/feeds/news/"
+    _RECENT_DAYS = 14
+
+    def run(self):
+        try:
+            req = urllib.request.Request(
+                self._URL, headers={"User-Agent": "velox-control-center/1.0"}
+            )
+            with urllib.request.urlopen(req, timeout=10) as r:
+                data = r.read()
+            root = ET.fromstring(data)
+            cutoff = datetime.now(timezone.utc) - timedelta(days=self._RECENT_DAYS)
+            items = []
+            for item in root.findall(".//item")[:5]:
+                title = (item.findtext("title") or "").strip()
+                link  = (item.findtext("link")  or "").strip()
+                pub   = (item.findtext("pubDate") or "").strip()
+                try:
+                    dt = email.utils.parsedate_to_datetime(pub)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    is_recent = dt >= cutoff
+                    date_str = dt.strftime("%Y-%m-%d")
+                except Exception:
+                    is_recent = False
+                    date_str = pub[:16] if pub else ""
+                items.append((title, link, date_str, is_recent))
+            self.done.emit(items)
+        except Exception:
+            self.done.emit([])
+
+
 class UpdateCheckWorker(QThread):
     done = pyqtSignal(list, list)   # (pacman_updates, flatpak_updates)
 
@@ -747,6 +816,9 @@ class VeloxStore(QMainWindow):
         self._search_worker = None
         self._install_worker = None
         self._pkgcheck_worker = None
+        self._news_worker = None
+        self._keyring_worker = None
+        self._arch_news = []
         self._current_results = []
 
         # Init backends
@@ -766,6 +838,7 @@ class VeloxStore(QMainWindow):
 
         self._build_ui()
         self._show_home()
+        self._start_keyring_autorefresh()
 
     def _build_ui(self):
         self.setStyleSheet(STYLESHEET)
@@ -850,6 +923,14 @@ class VeloxStore(QMainWindow):
         _sb_sep()
         _sb_section("TOOLS")
         _tool_btn("🔑  Fix Keyrings",    self._run_fix_keyrings)
+
+        self._keyring_status_lbl = QLabel("")
+        self._keyring_status_lbl.setStyleSheet(
+            f"font-size: 10px; color: {SUBTEXT}; padding: 0 6px 4px 6px;"
+        )
+        self._keyring_status_lbl.setWordWrap(True)
+        self._keyring_status_lbl.setVisible(False)
+        sb_layout.addWidget(self._keyring_status_lbl)
 
         _sb_sep()
         _sb_section("SOURCES")
@@ -1325,22 +1406,10 @@ class VeloxStore(QMainWindow):
     DESKTOPS = [
         ("KDE Plasma",  "plasma-desktop",  "plasma-desktop",
          "Full KDE Plasma desktop — the Velox default"),
-        ("GNOME",       "gnome",           "gnome-shell",
-         "Modern, polished GNOME desktop environment"),
-        ("XFCE",        "xfce4",           "xfce4-session",
-         "Lightweight and fast XFCE desktop"),
-        ("Cinnamon",    "cinnamon",        "cinnamon",
-         "Traditional Linux Mint-style desktop"),
-        ("MATE",        "mate",            "mate-session-manager",
-         "Classic GNOME 2 continuation"),
-        ("LXQt",        "lxqt",            "lxqt-session",
-         "Lightweight Qt-based desktop environment"),
-        ("Hyprland",    "hyprland",        "hyprland",
-         "Modern Wayland tiling compositor"),
-        ("i3",          "i3-wm",           "i3",
-         "Minimalist X11 tiling window manager"),
-        ("Sway",        "sway",            "sway",
-         "Wayland i3-compatible tiling compositor"),
+        ("Velimmon",    "velimmon",        "cinnamon",
+         "Velox Cinnamon — traditional desktop with Velox dark theme and Arc-Dark styling"),
+        ("Velfce",      "velfce",          "xfce4-session",
+         "Velox XFCE — lightweight desktop with Velox dark theme and Arc-Dark styling"),
     ]
 
     def _build_desktops_page(self):
@@ -1354,7 +1423,7 @@ class VeloxStore(QMainWindow):
         hdr = QLabel("Desktop Environments")
         hdr.setStyleSheet(f"font-size: 22px; font-weight: 800; color: {TEXT}; margin-bottom: 6px;")
         layout.addWidget(hdr)
-        sub = QLabel("Install additional desktop environments alongside your current one.")
+        sub = QLabel("Velox-supported desktop environments — themed, tested, and ready to use.")
         sub.setStyleSheet(f"font-size: 12px; color: {SUBTEXT}; margin-bottom: 20px;")
         layout.addWidget(sub)
 
@@ -1665,10 +1734,52 @@ class VeloxStore(QMainWindow):
             row["install_btn"].setVisible(not installed)
             row["remove_btn"].setVisible(installed)
 
+    def _pacman_db_age_hours(self) -> float:
+        files = glob.glob("/var/lib/pacman/sync/core.db")
+        if not files:
+            return 999.0
+        return (time.time() - os.path.getmtime(files[0])) / 3600
+
+    def _stale_db_guard(self, pkg_name: str,
+                        on_update_and_install,
+                        on_install_anyway) -> None:
+        age_h = self._pacman_db_age_hours()
+        if age_h < 1.0:
+            on_install_anyway()
+            return
+
+        hours = int(age_h)
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Package Database is Stale")
+        msg.setIcon(QMessageBox.Icon.Warning)
+        msg.setText(
+            f"Your package database hasn't been synced in "
+            f"<b>{hours} hour{'s' if hours != 1 else ''}</b>.<br><br>"
+            "Installing packages without first updating can cause dependency "
+            "conflicts — this is one of the most common ways Arch Linux systems "
+            "break. It is strongly recommended to run a full system update first."
+        )
+        update_btn  = msg.addButton("Update System & Install", QMessageBox.ButtonRole.AcceptRole)
+        anyway_btn  = msg.addButton("Install Anyway",          QMessageBox.ButtonRole.DestructiveRole)
+        msg.addButton("Cancel",                                 QMessageBox.ButtonRole.RejectRole)
+        msg.exec()
+        clicked = msg.clickedButton()
+        if clicked == update_btn:
+            on_update_and_install()
+        elif clicked == anyway_btn:
+            on_install_anyway()
+
     def _system_install(self, pkg: str):
-        self._run_terminal_cmd(
-            f"Installing {pkg}",
-            ["pkexec", "pacman", "-S", "--noconfirm", "--needed", pkg]
+        self._stale_db_guard(
+            pkg,
+            on_update_and_install=lambda: self._run_terminal_cmd(
+                f"Update System & Install {pkg}",
+                ["pkexec", "pacman", "-Syu", "--noconfirm", "--needed", pkg]
+            ),
+            on_install_anyway=lambda: self._run_terminal_cmd(
+                f"Installing {pkg}",
+                ["pkexec", "pacman", "-S", "--noconfirm", "--needed", pkg]
+            ),
         )
 
     def _system_remove(self, pkg: str):
@@ -1931,6 +2042,30 @@ class VeloxStore(QMainWindow):
 
     # ── TOOLS actions ─────────────────────────────────────────────────────────
 
+    def _start_keyring_autorefresh(self):
+        self._keyring_worker = KeyringAutoRefreshWorker()
+        self._keyring_worker.status.connect(self._on_keyring_status)
+        self._keyring_worker.done.connect(self._on_keyring_done)
+        self._keyring_worker.start()
+
+    def _on_keyring_status(self, msg: str):
+        self._keyring_status_lbl.setText(msg)
+        self._keyring_status_lbl.setStyleSheet(
+            f"font-size: 10px; color: {SUBTEXT}; padding: 0 6px 4px 6px;"
+        )
+        self._keyring_status_lbl.setVisible(True)
+
+    def _on_keyring_done(self, refreshed: bool):
+        if refreshed:
+            self._keyring_status_lbl.setText("✓  Keyring up to date")
+            self._keyring_status_lbl.setStyleSheet(
+                f"font-size: 10px; color: {GREEN}; padding: 0 6px 4px 6px;"
+            )
+            self._keyring_status_lbl.setVisible(True)
+            QTimer.singleShot(5000, lambda: self._keyring_status_lbl.setVisible(False))
+        else:
+            self._keyring_status_lbl.setVisible(False)
+
     def _run_fix_keyrings(self):
         script = (
             "pacman-key --init && "
@@ -2031,6 +2166,36 @@ class VeloxStore(QMainWindow):
         top.addWidget(self._upd_all_btn)
         layout.addLayout(top)
 
+        # ── Arch Linux news section ───────────────────────────────────────────
+        self._news_frame = QFrame()
+        self._news_frame.setStyleSheet(
+            f"QFrame {{ background: #1a2030; border-radius: 8px; border: 1px solid {GREEN}55; }}"
+        )
+        news_vbox = QVBoxLayout(self._news_frame)
+        news_vbox.setContentsMargins(12, 8, 12, 8)
+        news_vbox.setSpacing(4)
+
+        news_hdr_row = QHBoxLayout()
+        news_icon = QLabel("📰")
+        news_icon.setStyleSheet("font-size: 12px;")
+        news_hdr_row.addWidget(news_icon)
+        news_title_lbl = QLabel("Arch Linux News")
+        news_title_lbl.setStyleSheet(f"font-size: 11px; font-weight: 700; color: {TEXT};")
+        news_hdr_row.addWidget(news_title_lbl)
+        news_hdr_row.addStretch()
+        self._news_status_lbl = QLabel("Loading…")
+        self._news_status_lbl.setStyleSheet(f"font-size: 10px; color: {SUBTEXT};")
+        news_hdr_row.addWidget(self._news_status_lbl)
+        news_vbox.addLayout(news_hdr_row)
+
+        self._news_items_widget = QWidget()
+        self._news_items_layout = QVBoxLayout(self._news_items_widget)
+        self._news_items_layout.setContentsMargins(0, 2, 0, 0)
+        self._news_items_layout.setSpacing(2)
+        news_vbox.addWidget(self._news_items_widget)
+        layout.addWidget(self._news_frame)
+
+        # ── Package updates scroll area ───────────────────────────────────────
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         self._upd_inner = QWidget()
@@ -2039,7 +2204,7 @@ class VeloxStore(QMainWindow):
         self._upd_layout.setSpacing(0)
         self._upd_layout.addStretch()
         scroll.setWidget(self._upd_inner)
-        layout.addWidget(scroll)
+        layout.addWidget(scroll, 1)
         return page
 
     def _show_updates(self):
@@ -2061,6 +2226,18 @@ class VeloxStore(QMainWindow):
         self._update_worker = UpdateCheckWorker(self._backends.get("flatpak"))
         self._update_worker.done.connect(self._on_updates_done)
         self._update_worker.start()
+
+        # Fetch Arch news in parallel
+        self._news_status_lbl.setText("Loading…")
+        self._news_status_lbl.setStyleSheet(f"font-size: 11px; color: {SUBTEXT};")
+        while self._news_items_layout.count():
+            it = self._news_items_layout.takeAt(0)
+            if it.widget():
+                it.widget().deleteLater()
+        self._arch_news = []
+        self._news_worker = ArchNewsWorker()
+        self._news_worker.done.connect(self._on_news_done)
+        self._news_worker.start()
 
     def _on_updates_done(self, pacman_updates: list, flatpak_updates: list):
         while self._upd_layout.count() > 1:
@@ -2116,6 +2293,81 @@ class VeloxStore(QMainWindow):
                 sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
                 sep.setStyleSheet("color: #282828;"); insert(sep)
 
+    def _on_news_done(self, items: list):
+        self._arch_news = items
+        while self._news_items_layout.count():
+            it = self._news_items_layout.takeAt(0)
+            if it.widget():
+                it.widget().deleteLater()
+
+        if not items:
+            self._news_status_lbl.setText("Could not fetch news")
+            self._news_status_lbl.setStyleSheet(f"font-size: 11px; color: {SUBTEXT};")
+            return
+
+        recent_count = sum(1 for _, _, _, is_r in items if is_r)
+        if recent_count:
+            self._news_status_lbl.setText(
+                f"⚠  {recent_count} recent item{'s' if recent_count > 1 else ''} — read before updating"
+            )
+            self._news_status_lbl.setStyleSheet(
+                "font-size: 11px; color: #FF9800; font-weight: 600;"
+            )
+            self._news_frame.setStyleSheet(
+                "QFrame { background: #1e1500; border-radius: 10px; border: 1px solid #FF980066; }"
+            )
+        else:
+            self._news_status_lbl.setText("No recent alerts")
+            self._news_status_lbl.setStyleSheet(f"font-size: 11px; color: {GREEN};")
+            self._news_frame.setStyleSheet(
+                "QFrame { background: #1a1a2a; border-radius: 10px; border: 1px solid #2a2a4a; }"
+            )
+
+        for title, link, date_str, is_recent in items:
+            row = QWidget()
+            row.setStyleSheet("background: transparent;")
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 1, 0, 1)
+            row_layout.setSpacing(8)
+
+            if is_recent:
+                badge = QLabel("RECENT")
+                badge.setFixedWidth(48)
+                badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                badge.setStyleSheet(
+                    "font-size: 8px; font-weight: 700; color: #FF9800;"
+                    "background: #FF980033; border-radius: 4px; padding: 1px 4px;"
+                )
+                row_layout.addWidget(badge)
+
+            title_lbl = QLabel(title)
+            title_lbl.setStyleSheet(
+                f"background: transparent; font-size: 11px;"
+                f"color: {'#FF9800' if is_recent else TEXT};"
+                f"font-weight: {'600' if is_recent else '400'};"
+            )
+            row_layout.addWidget(title_lbl)
+            row_layout.addStretch()
+
+            date_lbl = QLabel(date_str)
+            date_lbl.setStyleSheet(f"background: transparent; font-size: 10px; font-weight: 600; color: {TEXT};")
+            date_lbl.setFixedWidth(76)
+            row_layout.addWidget(date_lbl)
+
+            if link:
+                read_btn = QPushButton("Read →")
+                read_btn.setFixedWidth(72)
+                read_btn.setFixedHeight(22)
+                read_btn.setStyleSheet(
+                    f"QPushButton {{ background: transparent; color: {GREEN}; border: 1px solid {GREEN}88;"
+                    f"border-radius: 10px; font-size: 10px; font-weight: 600; padding: 0 6px; }}"
+                    f"QPushButton:hover {{ background: {GREEN}22; }}"
+                )
+                read_btn.clicked.connect(lambda _, url=link: subprocess.Popen(["xdg-open", url]))
+                row_layout.addWidget(read_btn)
+
+            self._news_items_layout.addWidget(row)
+
     def _make_update_row(self, name: str, old_ver: str, new_ver: str, source: str) -> QWidget:
         w = QWidget()
         w.setMinimumHeight(52)
@@ -2140,7 +2392,26 @@ class VeloxStore(QMainWindow):
         return w
 
     def _run_update_all(self):
-        cmd = "pkexec pacman -Syu --noconfirm"
+        recent = [(t, l, d) for t, l, d, is_r in self._arch_news if is_r]
+        if recent:
+            msg = QMessageBox(self)
+            msg.setWindowTitle("Review Arch News Before Updating")
+            msg.setIcon(QMessageBox.Icon.Warning)
+            items_text = "\n".join(f"  •  {title}  ({date})" for title, _, date in recent)
+            msg.setText(
+                f"There {'is' if len(recent) == 1 else 'are'} {len(recent)} recent Arch Linux "
+                f"news item{'s' if len(recent) > 1 else ''} that may require manual steps "
+                f"before updating:\n\n{items_text}\n\n"
+                "Some updates need manual action first — skipping them can break your system.\n"
+                "Please read the news items above before continuing."
+            )
+            update_btn = msg.addButton("Update Anyway", QMessageBox.ButtonRole.AcceptRole)
+            msg.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+            msg.exec()
+            if msg.clickedButton() != update_btn:
+                return
+
+        cmd = "pkexec bash -c 'pacman -Sy --noconfirm archlinux-keyring && pacman -Syu --noconfirm'"
         if shutil.which("flatpak"):
             cmd += " && flatpak update -y"
         self._run_terminal_cmd("Update All", ["bash", "-c", cmd])
@@ -2150,6 +2421,15 @@ class VeloxStore(QMainWindow):
     def _on_install(self, pkg: Package):
         if pkg.source == "aur":
             self._run_pkgcheck_then_install(pkg)
+        elif pkg.source == "pacman":
+            self._stale_db_guard(
+                pkg.name,
+                on_update_and_install=lambda: self._run_terminal_cmd(
+                    f"Update System & Install {pkg.name}",
+                    ["pkexec", "pacman", "-Syu", "--noconfirm", "--needed", pkg.name]
+                ),
+                on_install_anyway=lambda: self._run_install(pkg),
+            )
         else:
             self._run_install(pkg)
 

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<channel name="thunar" version="1.0">
+  <property name="default-view" type="string" value="ThunarDetailsView"/>
+  <property name="last-view" type="string" value="ThunarDetailsView"/>
+  <property name="last-show-hidden" type="bool" value="false"/>
+  <property name="last-side-pane" type="string" value="ThunarShortcutsPane"/>
+  <property name="misc-single-click" type="bool" value="false"/>
+  <property name="misc-thumbnail-mode" type="string" value="THUNAR_THUMBNAIL_MODE_ALWAYS"/>
+  <property name="misc-date-style" type="string" value="THUNAR_DATE_STYLE_SHORT"/>
+</channel>
