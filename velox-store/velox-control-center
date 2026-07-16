@@ -493,31 +493,35 @@ class TerminalWorker(QThread):
 
 class KeyringAutoRefreshWorker(QThread):
     status = pyqtSignal(str)   # status message for UI
-    done   = pyqtSignal(bool)  # True = refreshed OK, False = skipped/failed
+    state  = pyqtSignal(str)   # "good" | "update" | "fix"
 
     _STALE_DAYS = 7
+    _CRITICAL_DAYS = 30
 
     def run(self):
         try:
-            # Check age of installed archlinux-keyring without root
             files = glob.glob("/var/lib/pacman/local/archlinux-keyring-*/desc")
             if not files:
-                self.done.emit(False)
+                self.state.emit("fix")
                 return
             age_days = (time.time() - os.path.getmtime(files[0])) / 86400
             if age_days < self._STALE_DAYS:
-                self.done.emit(False)
+                self.state.emit("good")
+                return
+            if age_days >= self._CRITICAL_DAYS:
+                self.state.emit("fix")
                 return
 
-            # Keyring is stale — refresh silently
+            # Stale — show update badge then silently refresh
+            self.state.emit("update")
             self.status.emit(f"🔑  Refreshing keyring ({int(age_days)}d old)…")
             result = subprocess.run(
                 ["pkexec", "pacman", "-Sy", "--noconfirm", "archlinux-keyring"],
                 capture_output=True, text=True, timeout=120
             )
-            self.done.emit(result.returncode == 0)
+            self.state.emit("good" if result.returncode == 0 else "fix")
         except Exception:
-            self.done.emit(False)
+            self.state.emit("fix")
 
 
 class ArchNewsWorker(QThread):
@@ -924,13 +928,12 @@ class VeloxStore(QMainWindow):
         _sb_section("TOOLS")
         _tool_btn("🔑  Fix Keyrings",    self._run_fix_keyrings)
 
-        self._keyring_status_lbl = QLabel("")
-        self._keyring_status_lbl.setStyleSheet(
-            f"font-size: 10px; color: {SUBTEXT}; padding: 0 6px 4px 6px;"
+        self._keyring_badge = QLabel("")
+        self._keyring_badge.setStyleSheet(
+            "font-size: 11px; font-weight: 600; padding: 0 6px 6px 6px;"
         )
-        self._keyring_status_lbl.setWordWrap(True)
-        self._keyring_status_lbl.setVisible(False)
-        sb_layout.addWidget(self._keyring_status_lbl)
+        self._keyring_badge.setVisible(False)
+        sb_layout.addWidget(self._keyring_badge)
 
         _sb_sep()
         _sb_section("SOURCES")
@@ -1403,26 +1406,39 @@ class VeloxStore(QMainWindow):
 
     # ── Desktops ──────────────────────────────────────────────────────────────
 
-    DESKTOPS = [
-        ("KDE Plasma",  "plasma-desktop",  "plasma-desktop",
-         "Full KDE Plasma desktop — the Velox default"),
-        ("GNOME",       "gnome",           "gnome-shell",
-         "Modern, polished GNOME desktop environment"),
-        ("XFCE",        "xfce4",           "xfce4-session",
-         "Lightweight and fast XFCE desktop"),
-        ("Cinnamon",    "cinnamon",        "cinnamon",
-         "Traditional Linux Mint-style desktop"),
-        ("MATE",        "mate",            "mate-session-manager",
-         "Classic GNOME 2 continuation"),
-        ("LXQt",        "lxqt",            "lxqt-session",
-         "Lightweight Qt-based desktop environment"),
-        ("Hyprland",    "hyprland",        "hyprland",
-         "Modern Wayland tiling compositor"),
-        ("i3",          "i3-wm",           "i3",
-         "Minimalist X11 tiling window manager"),
-        ("Sway",        "sway",            "sway",
-         "Wayland i3-compatible tiling compositor"),
+    VELOX_DESKTOPS = [
+        {
+            "name":       "KDE Plasma",
+            "key":        "kde",
+            "detect_pkg": "plasma-desktop",
+            "xdg":        ["KDE"],
+            "desc":       "Velox default — Wayland Plasma with ksmoothdock and Papirus icons",
+        },
+        {
+            "name":       "XFCE",
+            "key":        "xfce",
+            "detect_pkg": "xfce4-session",
+            "xdg":        ["XFCE"],
+            "desc":       "Lightweight Wayland desktop — waybar, Crystal Dock, Fluent theme",
+        },
+        {
+            "name":       "Cinnamon",
+            "key":        "cinnamon",
+            "detect_pkg": "cinnamon",
+            "xdg":        ["X-Cinnamon", "CINNAMON"],
+            "desc":       "Traditional layout — Velox Fluent Dark theme and Newaita icons",
+        },
     ]
+
+    def _get_active_de(self) -> str | None:
+        xdg = os.environ.get("XDG_CURRENT_DESKTOP", "").upper()
+        if "KDE" in xdg:
+            return "kde"
+        if "XFCE" in xdg:
+            return "xfce"
+        if "CINNAMON" in xdg:
+            return "cinnamon"
+        return None
 
     def _build_desktops_page(self):
         page = QScrollArea()
@@ -1435,27 +1451,147 @@ class VeloxStore(QMainWindow):
         hdr = QLabel("Desktop Environments")
         hdr.setStyleSheet(f"font-size: 22px; font-weight: 800; color: {TEXT}; margin-bottom: 6px;")
         layout.addWidget(hdr)
-        sub = QLabel("Install additional desktop environments alongside your current one.")
+        sub = QLabel("Install a Velox desktop — packages, theming, and dock come pre-configured.")
         sub.setStyleSheet(f"font-size: 12px; color: {SUBTEXT}; margin-bottom: 20px;")
         layout.addWidget(sub)
 
         self._desktop_rows: dict[str, dict] = {}
-        for name, pkg, icon_name, desc in self.DESKTOPS:
-            row = self._make_system_row(name, pkg, icon_name, desc, "pacman")
-            self._desktop_rows[pkg] = row
+        for de in self.VELOX_DESKTOPS:
+            row = self._make_velox_de_row(de)
+            self._desktop_rows[de["key"]] = row
             layout.addWidget(row["widget"])
             sep = QFrame()
             sep.setFrameShape(QFrame.Shape.HLine)
             sep.setStyleSheet("color: #282828;")
             layout.addWidget(sep)
 
+        note = QLabel("Log out and select the new session at the login screen after installing.")
+        note.setStyleSheet(f"font-size: 11px; color: {SUBTEXT}; margin-top: 12px;")
+        layout.addWidget(note)
         layout.addStretch()
         page.setWidget(inner)
         return page
 
+    def _make_velox_de_row(self, de: dict) -> dict:
+        w = QWidget()
+        w.setMinimumHeight(72)
+        row = QHBoxLayout(w)
+        row.setContentsMargins(0, 12, 0, 12)
+        row.setSpacing(16)
+
+        icon_lbl = QLabel()
+        icon_lbl.setFixedSize(48, 48)
+        themed = QIcon.fromTheme(de["detect_pkg"])
+        if not themed.isNull():
+            icon_lbl.setPixmap(themed.pixmap(48, 48))
+        else:
+            icon_lbl.setPixmap(_fallback_icon("pacman", 48))
+        row.addWidget(icon_lbl)
+
+        txt = QVBoxLayout()
+        txt.setSpacing(3)
+        name_lbl = QLabel(de["name"])
+        name_lbl.setStyleSheet(f"font-size: 15px; font-weight: 700; color: {TEXT};")
+        txt.addWidget(name_lbl)
+        desc_lbl = QLabel(de["desc"])
+        desc_lbl.setStyleSheet(f"font-size: 12px; color: {SUBTEXT};")
+        txt.addWidget(desc_lbl)
+        row.addLayout(txt)
+        row.addStretch()
+
+        active_badge = QLabel("● Active")
+        active_badge.setStyleSheet(
+            f"font-size: 10px; font-weight: 700; color: {GREEN};"
+            f"background: {GREEN}22; border-radius: 8px; padding: 2px 8px;"
+        )
+        active_badge.setVisible(False)
+        row.addWidget(active_badge)
+
+        inst_badge = QLabel("Installed")
+        inst_badge.setStyleSheet(
+            f"font-size: 10px; font-weight: 600; color: {GREEN};"
+            f"background: {GREEN}22; border-radius: 8px; padding: 2px 8px;"
+        )
+        inst_badge.setVisible(False)
+        row.addWidget(inst_badge)
+
+        install_btn = QPushButton("Install")
+        install_btn.setFixedWidth(100)
+        remove_btn = QPushButton("Remove")
+        remove_btn.setObjectName("danger")
+        remove_btn.setFixedWidth(100)
+        remove_btn.setVisible(False)
+
+        install_btn.clicked.connect(lambda _, d=de: self._install_velox_desktop(d))
+        remove_btn.clicked.connect(lambda _, d=de: self._remove_velox_desktop(d))
+        row.addWidget(install_btn)
+        row.addWidget(remove_btn)
+
+        return {
+            "widget":       w,
+            "key":          de["key"],
+            "detect_pkg":   de["detect_pkg"],
+            "active_badge": active_badge,
+            "inst_badge":   inst_badge,
+            "install_btn":  install_btn,
+            "remove_btn":   remove_btn,
+        }
+
     def _show_desktops(self):
-        self._refresh_system_rows(self._desktop_rows)
+        self._refresh_de_rows()
         self._stack.setCurrentIndex(3)
+
+    def _refresh_de_rows(self):
+        if "pacman" not in self._backends:
+            return
+        localdb = self._backends["pacman"]._localdb
+        active_key = self._get_active_de()
+        for key, row in self._desktop_rows.items():
+            installed = localdb.get_pkg(row["detect_pkg"]) is not None
+            is_active = (key == active_key)
+            row["active_badge"].setVisible(is_active)
+            row["inst_badge"].setVisible(installed and not is_active)
+            row["install_btn"].setVisible(not installed)
+            row["remove_btn"].setVisible(installed and not is_active)
+
+    def _install_velox_desktop(self, de: dict):
+        import getpass
+        username = getpass.getuser()
+        install_cmd = [
+            "pkexec", "/usr/lib/velox-installer/install-velox-desktop.sh",
+            de["key"], username,
+        ]
+        update_and_install_cmd = [
+            "pkexec", "bash", "-c",
+            f"pacman -Syu --noconfirm && "
+            f"/usr/lib/velox-installer/install-velox-desktop.sh {de['key']} {username}",
+        ]
+        self._stale_db_guard(
+            de["name"],
+            on_update_and_install=lambda: self._run_terminal_cmd(
+                f"Installing Velox {de['name']}",
+                update_and_install_cmd,
+                on_done=self._refresh_de_rows,
+            ),
+            on_install_anyway=lambda: self._run_terminal_cmd(
+                f"Installing Velox {de['name']}",
+                install_cmd,
+                on_done=self._refresh_de_rows,
+            ),
+        )
+
+    def _remove_velox_desktop(self, de: dict):
+        reply = QMessageBox.question(
+            self, "Remove Desktop",
+            f"Remove {de['name']}? This will uninstall its core package.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self._run_terminal_cmd(
+                f"Removing {de['name']}",
+                ["pkexec", "pacman", "-Rns", "--noconfirm", de["detect_pkg"]],
+                on_done=self._refresh_de_rows,
+            )
 
     # ── Kernels ───────────────────────────────────────────────────────────────
 
@@ -2031,7 +2167,7 @@ class VeloxStore(QMainWindow):
         layout.addWidget(self._terminal_status)
         return page
 
-    def _run_terminal_cmd(self, title: str, cmd: list):
+    def _run_terminal_cmd(self, title: str, cmd: list, on_done=None):
         self._terminal_title.setText(title)
         self._terminal_output.clear()
         self._terminal_status.setText("Running…")
@@ -2042,6 +2178,8 @@ class VeloxStore(QMainWindow):
             lambda line: self._terminal_output.append(line)
         )
         self._term_worker.finished_ok.connect(self._on_terminal_done)
+        if on_done:
+            self._term_worker.finished_ok.connect(on_done)
         self._term_worker.start()
 
     def _on_terminal_done(self, ok: bool):
@@ -2056,27 +2194,26 @@ class VeloxStore(QMainWindow):
 
     def _start_keyring_autorefresh(self):
         self._keyring_worker = KeyringAutoRefreshWorker()
-        self._keyring_worker.status.connect(self._on_keyring_status)
-        self._keyring_worker.done.connect(self._on_keyring_done)
+        self._keyring_worker.state.connect(self._on_keyring_state)
         self._keyring_worker.start()
 
-    def _on_keyring_status(self, msg: str):
-        self._keyring_status_lbl.setText(msg)
-        self._keyring_status_lbl.setStyleSheet(
-            f"font-size: 10px; color: {SUBTEXT}; padding: 0 6px 4px 6px;"
-        )
-        self._keyring_status_lbl.setVisible(True)
-
-    def _on_keyring_done(self, refreshed: bool):
-        if refreshed:
-            self._keyring_status_lbl.setText("✓  Keyring up to date")
-            self._keyring_status_lbl.setStyleSheet(
-                f"font-size: 10px; color: {GREEN}; padding: 0 6px 4px 6px;"
+    def _on_keyring_state(self, state: str):
+        if state == "good":
+            self._keyring_badge.setText("● Good")
+            self._keyring_badge.setStyleSheet(
+                f"font-size: 11px; font-weight: 600; color: {GREEN}; padding: 0 6px 6px 6px;"
             )
-            self._keyring_status_lbl.setVisible(True)
-            QTimer.singleShot(5000, lambda: self._keyring_status_lbl.setVisible(False))
+        elif state == "update":
+            self._keyring_badge.setText("● Update")
+            self._keyring_badge.setStyleSheet(
+                "font-size: 11px; font-weight: 600; color: #fdd663; padding: 0 6px 6px 6px;"
+            )
         else:
-            self._keyring_status_lbl.setVisible(False)
+            self._keyring_badge.setText("● Fix")
+            self._keyring_badge.setStyleSheet(
+                "font-size: 11px; font-weight: 600; color: #f28b82; padding: 0 6px 6px 6px;"
+            )
+        self._keyring_badge.setVisible(True)
 
     def _run_fix_keyrings(self):
         script = (
@@ -2086,8 +2223,12 @@ class VeloxStore(QMainWindow):
         )
         self._run_terminal_cmd(
             "Fix Keyrings",
-            ["pkexec", "bash", "-c", script]
+            ["pkexec", "bash", "-c", script],
+            on_done=self._recheck_keyring_badge
         )
+
+    def _recheck_keyring_badge(self, ok: bool):
+        self._start_keyring_autorefresh()
 
     def _toggle_source(self, source: str, enabled: bool):
         if enabled:
