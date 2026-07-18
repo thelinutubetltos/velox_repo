@@ -1,0 +1,9 @@
+[Desktop Entry]
+Categories=AudioVideo;Audio;Player;GTK;
+Comment=Bookmark editor for Radiotray-NG
+Exec=/usr/bin/rtng-bookmark-editor
+Icon=/usr/share/icons/hicolor/256x256/apps/radiotray-ng-notification.png
+Name=Radiotray-NG Bookmark Editor
+StartupNotify=false
+Terminal=false
+Type=Application

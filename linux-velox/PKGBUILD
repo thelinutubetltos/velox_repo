@@ -34,6 +34,7 @@
 : "${_build_nvidia_open:=no}"
 : "${_build_r8125:=no}"
 : "${_build_debug:=no}"
+: "${_vfio_acs_override:=yes}"
 : "${_autofdo:=no}"
 : "${_autofdo_profile_name:=}"
 : "${_propeller:=no}"
@@ -105,6 +106,9 @@ fi
     source+=(propeller_cc_profile.txt propeller_ld_profile.txt)
 
 [ "$_build_r8125" = "yes" ] && source+=("git+https://github.com/aravance/r8125.git")
+
+[ "$_vfio_acs_override" = "yes" ] && \
+    source+=("https://raw.githubusercontent.com/Frogging-Family/linux-tkg/master/linux-tkg-patches/7.0/0006-add-acs-overrides_iommu.patch")
 
 case "$_cpusched" in
     bore|rt-bore|hardened) source+=("${_patchsource}/sched/0001-bore-cachy.patch");;&
@@ -409,4 +413,5 @@ done
 b2sums=('d3aa0ac4d37e3f8f2f888fc07db7f07b4d6b10b389ab7f75a59d7eada9656e9ef078668d76f9db528c6086b9ab53cd80ad95d36bdbfa5ca1c76c3cd7c452713c'
         'SKIP'
         '7bb5113dbc67e8e2ce5c5473ae1b08973af5adba0a6a14c64a213bb116e5a172d40b7c274b85ad15553511484ee1f120e0372251e242c6f87ce6920235f0c136'
-        'c992567bd7dd8553432be496ffa1c17e2f5ebe9c7edb51945cf977e1b742dd6517c210d8843bb82744ca705efd07f8027cd7dde41b50215ebd707a34aa81462e')
+        'c992567bd7dd8553432be496ffa1c17e2f5ebe9c7edb51945cf977e1b742dd6517c210d8843bb82744ca705efd07f8027cd7dde41b50215ebd707a34aa81462e'
+        'c2d2b6bd8e94d4c9725720128419ef571576c97a792c690a80d97753cdf1afde20103c5479d18ae3825fa7b72d2dbe7ee2d5838351d041f03f65c6246d69245e')

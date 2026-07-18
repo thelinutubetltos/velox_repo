@@ -1,0 +1,23 @@
+#!/bin/sh
+
+set -e
+
+if [ -d "/usr/share/icons/breeze" ]; then
+  gtk-update-icon-cache -f -t -q /usr/share/icons/breeze/
+fi
+
+if [ -d "/usr/share/icons/hicolor" ]; then
+  gtk-update-icon-cache -f -t -q /usr/share/icons/hicolor/
+fi
+
+if [ -d "/usr/share/icons/Yaru" ]; then
+  gtk-update-icon-cache -f -t -q /usr/share/icons/Yaru/
+fi
+
+if [ -d "/usr/share/icons/ubuntu-mono-light" ]; then
+	gtk-update-icon-cache -f -t -q /usr/share/icons/ubuntu-mono-light/
+fi
+
+if [ -d "/usr/share/icons/ubuntu-mono-dark" ]; then
+	gtk-update-icon-cache -f -t -q /usr/share/icons/ubuntu-mono-dark/
+fi

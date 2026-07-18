@@ -3,11 +3,11 @@
 pkgname = velox-wallpapers
 pkgbase = velox-wallpapers
 xdata = pkgtype=pkg
-pkgver = 1.1-1
+pkgver = 1.1-2
 pkgdesc = Official Velox Linux wallpapers
 url = https://github.com/thelinutubetltos/velox-iso
-builddate = 1781837680
+builddate = 1783121104
 packager = Unknown Packager
-size = 30923103
+size = 15550357
 arch = any
 license = custom
