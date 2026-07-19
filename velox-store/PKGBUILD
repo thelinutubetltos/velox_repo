@@ -1,6 +1,6 @@
 pkgname=velox-control-center
 pkgver=1.0
-pkgrel=12
+pkgrel=13
 pkgdesc="Velox Control Center — software, drivers, kernels, desktops, snapshots and system tools"
 arch=('any')
 url="https://github.com/thelinutubetltos/velox-iso"
@@ -42,15 +42,4 @@ package() {
     install -Dm644 "$src/velox-control-center.desktop" \
         "$pkgdir/usr/share/applications/velox-control-center.desktop"
 
-    # Hide extra SDDM sessions — only Velox XFCE and KDE/Plasma should appear.
-    # openbox/xfce/xfce-wayland/labwc session files come from their packages
-    # and would clutter the session picker without these overrides.
-    for f in usr/share/xsessions/openbox.desktop usr/share/xsessions/xfce.desktop; do
-        install -dm755 "$pkgdir/$(dirname $f)"
-        printf '[Desktop Entry]\nHidden=true\n' > "$pkgdir/$f"
-    done
-    for f in usr/share/wayland-sessions/xfce-wayland.desktop usr/share/wayland-sessions/labwc.desktop; do
-        install -dm755 "$pkgdir/$(dirname $f)"
-        printf '[Desktop Entry]\nHidden=true\n' > "$pkgdir/$f"
-    done
 }

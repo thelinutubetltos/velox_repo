@@ -3,12 +3,12 @@
 pkgname = velox-control-center
 pkgbase = velox-control-center
 xdata = pkgtype=pkg
-pkgver = 1.0-12
+pkgver = 1.0-13
 pkgdesc = Velox Control Center — software, drivers, kernels, desktops, snapshots and system tools
 url = https://github.com/thelinutubetltos/velox-iso
-builddate = 1784343955
+builddate = 1784345162
 packager = Unknown Packager
-size = 1439471
+size = 1439359
 arch = any
 license = custom
 depend = python

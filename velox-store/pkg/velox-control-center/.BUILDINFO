@@ -1,11 +1,11 @@
 format = 2
 pkgname = velox-control-center
 pkgbase = velox-control-center
-pkgver = 1.0-12
+pkgver = 1.0-13
 pkgarch = any
-pkgbuild_sha256sum = 774c548b92855d6d71e04c2b10164b54d4f50d35d9ad44d1e5a7be621e82c6fc
+pkgbuild_sha256sum = 0682150b385d90ff50d83e03e025a41804c4fe0a65756ba4fae871924f7e3340
 packager = Unknown Packager
-builddate = 1784343955
+builddate = 1784345162
 builddir = /home/alex/velox_repo/velox-store
 startdir = /home/alex/velox_repo/velox-store
 buildtool = makepkg
