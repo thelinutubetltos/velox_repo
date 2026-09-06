@@ -469,9 +469,23 @@ class RemoveWorker(QThread):
             ok, out = False, "AUR packages must be removed via pacman."
         self.done.emit(ok, out)
 
+def _pacman_lock_is_stale() -> bool:
+    """True if /var/lib/pacman/db.lck is absent, or present but no pacman
+    process is actually holding it (a crashed/killed transaction left it
+    behind). False if a real pacman transaction is genuinely in progress."""
+    if not os.path.exists("/var/lib/pacman/db.lck"):
+        return True
+    try:
+        result = subprocess.run(["pgrep", "-x", "pacman"], capture_output=True, timeout=5)
+        return result.returncode != 0
+    except Exception:
+        return False
+
+
 class TerminalWorker(QThread):
     line_ready  = pyqtSignal(str)
     finished_ok = pyqtSignal(bool)
+    lock_error  = pyqtSignal()
 
     def __init__(self, cmd: list):
         super().__init__()
@@ -483,9 +497,14 @@ class TerminalWorker(QThread):
                 self.cmd, stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT, text=True, bufsize=1
             )
+            saw_lock_error = False
             for line in proc.stdout:
                 self.line_ready.emit(line.rstrip())
+                if "unable to lock database" in line:
+                    saw_lock_error = True
             proc.wait()
+            if saw_lock_error:
+                self.lock_error.emit()
             self.finished_ok.emit(proc.returncode == 0)
         except Exception as e:
             self.line_ready.emit(f"Error: {e}")
@@ -2178,6 +2197,7 @@ class VeloxStore(QMainWindow):
             lambda line: self._terminal_output.append(line)
         )
         self._term_worker.finished_ok.connect(self._on_terminal_done)
+        self._term_worker.lock_error.connect(self._on_lock_error)
         if on_done:
             self._term_worker.finished_ok.connect(on_done)
         self._term_worker.start()
@@ -2189,6 +2209,27 @@ class VeloxStore(QMainWindow):
             self._terminal_status.setText("❌  Command finished with errors")
         if "pacman" in self._backends:
             self._backends["pacman"].refresh()
+
+    def _on_lock_error(self):
+        """Pacman reported 'unable to lock database'. If a real pacman
+        transaction is genuinely running elsewhere, leave it alone — the
+        user just needs to wait. Otherwise this app's own state is stuck
+        (stale lock file, or a wedged worker thread from an earlier run),
+        so clear the stale lock and restart the app to get back to a
+        clean state, rather than making the user do it by hand."""
+        if not _pacman_lock_is_stale():
+            self._terminal_status.setText(
+                "⏳  Another package operation is already running — please wait for it to finish."
+            )
+            return
+        self._terminal_status.setText("🔁  Stale package lock detected — restarting Control Center…")
+        if os.path.exists("/var/lib/pacman/db.lck"):
+            subprocess.run(["pkexec", "rm", "-f", "/var/lib/pacman/db.lck"],
+                            capture_output=True, timeout=15)
+        QTimer.singleShot(1500, self._restart_app)
+
+    def _restart_app(self):
+        os.execv(sys.executable, [sys.executable] + sys.argv)
 
     # ── TOOLS actions ─────────────────────────────────────────────────────────
 
