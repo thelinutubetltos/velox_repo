@@ -26,6 +26,9 @@ jobs:
       - name: Strip git metadata from artifact
         run: rm -rf .git
 
+      - name: Remove dangling symlinks (upload-pages-artifact can't handle them)
+        run: find . -xtype l -delete
+
       - name: Ensure Jekyll is skipped
         run: touch .nojekyll
 
